@@ -268,17 +268,42 @@ constexpr const char* kKvLabel      = "u15-kv";
 
 }  // namespace
 
+void
+U15GenerateStage::apply_constant(unsigned iport, const vpipe::FlexData& beat)
+{
+  if (iport != (unsigned)kModelPort) { return; }
+  // The REFERENCE, exactly as the runtime latch stores it -- the two
+  // have to agree or the directory declared is not the one loaded.
+  vpipe::apply_model_select_beat(beat, _hf_dir);
+}
+
+std::string
+U15GenerateStage::model_dir_() const
+{
+  return vpipe::resolve_model_dir(session(), _hf_dir);
+}
+
 std::vector<ResourceClaim>
 U15GenerateStage::declare_resources() const
 {
-  // Declared from the CONFIGURED directory only. When the directory
-  // arrives on a port instead, there is nothing to declare yet -- and a
-  // claim for a directory this stage may not load would size peers
-  // against a model that never appears.
+  // `_hf_dir` is whichever source named the checkpoint: this stage's
+  // own config, or a model-select beat that apply_constant() latched
+  // before this phase runs. Empty means neither did, and a claim for a
+  // model that was never named would size peers against one that never
+  // appears.
   if (_hf_dir.empty()) { return {}; }
 
   namespace mm = vpipe::model_memory;
   std::vector<ResourceClaim> out;
+
+  // The RESOLVED directory, not the reference: these claims are keyed
+  // by directory and have to name the same one open_weight_set() will,
+  // or the ledger describes a checkpoint nothing ever loads. An
+  // unresolved key also measures ZERO here -- streaming_floor_bytes()
+  // and weight_claims() both walk the path -- and a claim that reads as
+  // small rather than absent is what admits a graph the box cannot
+  // hold.
+  const std::string dir = model_dir_();
 
   // WEIGHTS, with the floor this model can be reduced to if it streams:
   // everything outside the layer stack, plus the two in-flight slots a
@@ -286,11 +311,11 @@ U15GenerateStage::declare_resources() const
   // tell a peer sizing after us that a 16 GB box cannot run this graph,
   // when in fact it can -- slowly.
   const std::size_t floor =
-      mm::streaming_floor_bytes(_hf_dir, {kLayerStem});
+      mm::streaming_floor_bytes(dir, {kLayerStem});
   if (floor > 0) {
-    out.push_back(mm::weight_claim_streamable(_hf_dir, floor));
+    out.push_back(mm::weight_claim_streamable(dir, floor));
   } else {
-    for (auto& c : mm::weight_claims({_hf_dir})) {
+    for (auto& c : mm::weight_claims({dir})) {
       out.push_back(std::move(c));
     }
   }
@@ -306,7 +331,7 @@ U15GenerateStage::declare_resources() const
   // would be worse than the absence of one.
   U15Config cfg;
   std::string why;
-  if (parse_config(_hf_dir, &cfg, &why)) {
+  if (parse_config(dir, &cfg, &why)) {
     // Three branches is the EDIT worst case (conditional, image-only,
     // unconditional); a t2i run uses two. Over-declaring the KV is the
     // safe direction -- it is what the box has to survive.
@@ -339,12 +364,22 @@ U15GenerateStage::ensure_loaded_()
     return fail("no checkpoint: set hf_dir or wire a model-select source "
                 "to the model iport");
   }
+  // Resolved ONCE for the whole load: every step below walks the
+  // filesystem, and re-resolving per step would hit LMDB each time for
+  // an answer that cannot change mid-load.
+  const std::string dir = model_dir_();
   std::string why;
-  if (!detect(_hf_dir, &why)) {
-    return fail("'" + _hf_dir + "' is not a SenseNova-U1.5 MoT checkpoint: " +
-                why);
+  if (!detect(dir, &why)) {
+    // Names the REFERENCE the user gave, and the directory it landed on
+    // when those differ -- "'sensenova/Foo' is not a checkpoint: no
+    // config.json" is a puzzle when the reference resolved somewhere
+    // the reader cannot see.
+    const std::string what =
+        (dir == _hf_dir) ? ("'" + _hf_dir + "'")
+                         : ("'" + _hf_dir + "' (-> " + dir + ")");
+    return fail(what + " is not a SenseNova-U1.5 MoT checkpoint: " + why);
   }
-  if (!parse_config(_hf_dir, &_cfg, &why)) {
+  if (!parse_config(dir, &_cfg, &why)) {
     return fail("cannot read the config: " + why);
   }
 
@@ -355,7 +390,7 @@ U15GenerateStage::ensure_loaded_()
   std::string err;
   if (!_ops->init(mc, &err)) { return fail("Metal init: " + err); }
 
-  auto ws = vpipe::genai::open_weight_set(_hf_dir, session());
+  auto ws = vpipe::genai::open_weight_set(dir, session());
   if (ws == nullptr) { return fail("cannot open the weight set"); }
 
   // ---- stream, or hold the stack? -----------------------------------
@@ -373,7 +408,7 @@ U15GenerateStage::ensure_loaded_()
   // this stage's own weights beside whatever its peers declared.
   namespace mm = vpipe::model_memory;
   const mm::StreamPlan plan =
-      mm::plan_streaming(session(), _hf_dir, "", mm::kStreamHeadroom);
+      mm::plan_streaming(session(), dir, "", mm::kStreamHeadroom);
 
   U15Weights::Options opt;
   opt.stream_layers = plan.stream;
@@ -410,7 +445,7 @@ U15GenerateStage::ensure_loaded_()
   if (_image == nullptr) { return fail("image path: " + err); }
 
   prog.update(2, 3, "tokenizer");
-  _prompt = Prompt::load(_hf_dir, session(), &err);
+  _prompt = Prompt::load(dir, session(), &err);
   if (_prompt == nullptr) { return fail("tokenizer: " + err); }
 
   Generator::Deps d;
@@ -437,7 +472,7 @@ U15GenerateStage::ensure_loaded_()
   // whose directory arrived on a port declared nothing and gets nothing
   // here either.
   if (auto* mgr = session()->services()->generative_model_manager()) {
-    mgr->revise_declaration(_hf_dir, _weights->resident_bytes());
+    mgr->revise_declaration(dir, _weights->resident_bytes());
     // And the two non-weight terms, now that the geometry is settled.
     // The plan declared them from the config; these are the same
     // formulas over the same numbers, so they will usually agree -- the
@@ -468,7 +503,7 @@ U15GenerateStage::ensure_loaded_()
   session()->info(fmt(
       "U15GenerateStage('{}'): loaded {} -- {:.2f} GB resident ({} of {} "
       "layers held, {} MB each), of which {:.2f} GB converted from F32",
-      this->id(), _hf_dir,
+      this->id(), dir,
       (double)_weights->resident_bytes() / (1024.0 * 1024 * 1024),
       _weights->resident_layers(), _cfg.llm.num_hidden_layers,
       _weights->layer_bytes() >> 20,
@@ -493,7 +528,7 @@ U15GenerateStage::resolve_policy_()
   // peer needing the room RIGHT NOW, which park cannot guarantee; that
   // is a decision for a graph to state, not for this to guess.
   const bool tight =
-      mm::bounded(session(), {_hf_dir}, mm::kHeadroom) ||
+      mm::bounded(session(), {model_dir_()}, mm::kHeadroom) ||
       mm::peer_streams(session());
   _idle = tight ? mm::UnloadPolicy::kPark : mm::UnloadPolicy::kKeep;
   session()->log_debug(fmt(
@@ -526,9 +561,13 @@ U15GenerateStage::process(RuntimeContext& ctx)
             mb ? dynamic_cast<const FlexDataPayload*>(mb.get()) : nullptr) {
       std::string ref;
       if (vpipe::apply_model_select_beat(mp->data, ref) && !ref.empty()) {
-        const std::string d = vpipe::resolve_model_dir(session(), ref);
-        if (!d.empty() && d != _hf_dir) {
-          _hf_dir = d;
+        // Latch the REFERENCE, the way the config path holds one, and
+        // let model_dir_() resolve it at each use. Storing the resolved
+        // directory here instead made this the only path that resolved
+        // at all, which is what left a configured registry key going
+        // straight to the filesystem as if it were a path.
+        if (ref != _hf_dir) {
+          _hf_dir = ref;
           unload_();
           _load_failed = false;
         }
@@ -665,7 +704,7 @@ U15GenerateStage::process(RuntimeContext& ctx)
     // sizes after this one there is 26 GB of room this model has since
     // taken back. Revised UP is the direction that matters; the whole
     // point of declaring is that nobody sizes against a fiction.
-    mgr->revise_declaration(_hf_dir, _weights->resident_bytes());
+    mgr->revise_declaration(model_dir_(), _weights->resident_bytes());
   }
   if (_weights->streaming()) {
     session()->log_debug(fmt(
@@ -727,14 +766,20 @@ U15GenerateStage::process(RuntimeContext& ctx)
       const bool streaming = _weights->streaming();
       std::size_t parked = 0;
       auto* mgr = session()->services()->generative_model_manager();
+      // The DIRECTORY, again: park_weights() looks its argument up in
+      // the manager's weight-set map, which is keyed by canonical
+      // directory. Handed a registry key it matches nothing and parks
+      // zero -- silently, since parking nothing is also what a set with
+      // nothing parkable returns.
+      const std::string dir = model_dir_();
       if (!streaming) {
         unload_();
         if (mgr != nullptr) {
-          parked = mgr->park_weights(_hf_dir);
-          mgr->revise_declaration(_hf_dir, 0);
+          parked = mgr->park_weights(dir);
+          mgr->revise_declaration(dir, 0);
         }
       } else if (mgr != nullptr) {
-        mgr->revise_declaration(_hf_dir, _weights->resident_bytes());
+        mgr->revise_declaration(dir, _weights->resident_bytes());
       }
       // Logged INCLUDING when everything is zero. A silent nothing is
       // how a policy gets believed to be working when it is not.

@@ -61,7 +61,34 @@ public:
 
   vpipe::Job process(vpipe::RuntimeContext& ctx) override;
 
+  // Pre-launch twin of the model-port latch in process(): the same beat
+  // and the same parse, early enough that declare_resources() sees the
+  // model.
+  //
+  // Without it a graph that names its checkpoint through a model-select
+  // stage -- rather than in this stage's own config -- declares NOTHING,
+  // and 33 GB of weights never reach the ledger the streaming decision
+  // is taken against. That is the quiet direction of wrong: the plan
+  // reads as roomy and the graph is admitted.
+  //
+  // Bookkeeping only; nothing loads here (see Stage::apply_constant).
+  void apply_constant(unsigned iport, const vpipe::FlexData& beat) override;
+
 private:
+  // `_hf_dir` as a DIRECTORY on disk.
+  //
+  // What the user configures is a model REFERENCE, which may be a
+  // registry key (`sensenova/SenseNova-U1.5-8B-MoT`, what model-fetch
+  // wrote) as easily as a path. Everything downstream -- detect,
+  // parse_config, the weight set, the tokenizer, and every claim keyed
+  // on a directory -- walks the filesystem, so each of those has to ask
+  // for the resolved form. resolve_model_dir() returns a plain path
+  // unchanged, so this is safe on both.
+  //
+  // The raw reference is KEPT rather than overwritten: it is what the
+  // user named, and it is the right thing to put in a message.
+  std::string model_dir_() const;
+
   bool ensure_loaded_();
   void unload_();
 
