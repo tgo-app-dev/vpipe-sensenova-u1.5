@@ -1,0 +1,17 @@
+# Out-of-source build trees are machine-local, as in the vpipe tree.
+build/
+build-*/
+cmake-build-*/
+
+.DS_Store
+compile_commands.json
+
+# Generated images from a local run, and golden blobs, are not source.
+*.jpeg
+*.jpg
+*.png
+*.npy
+*.mdb
+
+# clangd index
+.cache/

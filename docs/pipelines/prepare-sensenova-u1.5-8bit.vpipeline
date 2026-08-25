@@ -1,0 +1,18 @@
+{
+  "id": "prepare-sensenova-u1.5-8bit",
+  "stages": [
+    {
+      "id": "model-quantize",
+      "type": "model-quantize",
+      "iports": [],
+      "config": {
+        "src_model": "sensenova/SenseNova-U1.5-8B-MoT",
+        "output_name": "sensenova-u1.5-8b-mot-w8",
+        "bits": 8,
+        "group_size": 64,
+        "target": "language_model.model.layers."
+      }
+    }
+  ],
+  "subpipelines": []
+}

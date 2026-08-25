@@ -1,0 +1,33 @@
+vpipe-sensenova-u1.5
+Copyright 2026 T-Go LLC
+
+vpipe-sensenova-u1.5 is developed by T-Go LLC.
+https://github.com/tgo-app-dev/vpipe-sensenova-u1.5
+
+This product includes software developed at T-Go LLC.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may
+not use this file except in compliance with the License. You may obtain
+a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This is a plugin for Vpipe (https://github.com/tgo-app-dev/vpipe), which
+is separately licensed under the Apache License, Version 2.0 and carries
+its own NOTICE.
+
+--------------------------------------------------------------------
+Third-party
+--------------------------------------------------------------------
+
+This plugin runs the SenseNova-U1.5-8B-MoT model published by SenseTime
+(https://huggingface.co/sensenova/SenseNova-U1.5-8B-MoT). The weights
+are licensed under the Apache License, Version 2.0 and are NOT
+distributed with this plugin; obtaining them is subject to whatever
+terms the publisher applies at the point of download.
+
+The architecture was ported against the reference implementation at
+https://github.com/OpenSenseNova/SenseNova-U1 (Apache-2.0). No code from
+that repository is included here, and none is redistributed: it is
+imported at development time only, to generate test fixtures, and is not
+part of the built plugin.

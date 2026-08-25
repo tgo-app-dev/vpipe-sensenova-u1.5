@@ -1,0 +1,63 @@
+{
+  "id": "sensenova-u1.5-preview",
+  "stages": [
+    {
+      "id": "text-prompt",
+      "type": "text-prompt",
+      "iports": [],
+      "config": {
+        "text": "a lighthouse on a cliff at sunset, dramatic clouds"
+      }
+    },
+    {
+      "id": "sensenova-u1.5-model-config",
+      "type": "sensenova-u1.5-model-config",
+      "iports": [],
+      "config": {
+        "cfg_scale": 4.0,
+        "timestep_shift": 3.0,
+        "cfg_norm": "none"
+      }
+    },
+    {
+      "id": "sensenova-u1.5-generate",
+      "type": "sensenova-u1.5-generate",
+      "iports": [
+        {
+          "src": "text-prompt",
+          "oport": 0
+        },
+        {
+          "src": "",
+          "oport": 0
+        },
+        {
+          "src": "sensenova-u1.5-model-config",
+          "oport": 0
+        }
+      ],
+      "config": {
+        "hf_dir": "sensenova/SenseNova-U1.5-8B-MoT",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "seed": 42,
+        "unload_when_idle": "destroy"
+      }
+    },
+    {
+      "id": "save-image",
+      "type": "save-image",
+      "iports": [
+        {
+          "src": "sensenova-u1.5-generate",
+          "oport": 0
+        }
+      ],
+      "config": {
+        "path": "sensenova-u1.5-preview.jpeg"
+      }
+    }
+  ],
+  "subpipelines": []
+}
