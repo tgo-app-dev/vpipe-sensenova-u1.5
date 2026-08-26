@@ -53,7 +53,12 @@ const ConfigKey kAttrs[] = {
           "safetensors shards, vocab.json + merges.txt). OPTIONAL: a "
           "model-select source on the model iport overrides it",
    .suggest_db = vpipe::kModelRegistryDb,
-   .suggest_db_type = "sensenova-u1.5"},
+   .suggest_db_type = "sensenova-u1.5",
+   // On the shared-model channel, so a model-select source offers this
+   // family too. The host cannot list it -- this stage does not exist
+   // when the host is compiled -- so the picker is derived from what
+   // every registered consumer declares, and this is the declaration.
+   .model_channel = "diffusion-model"},
 
   {.key = "width", .type = ConfigType::Int, .required = false,
    .doc = "output width in pixels, rounded UP to a multiple of 32 (one "
