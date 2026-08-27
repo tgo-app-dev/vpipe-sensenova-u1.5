@@ -131,6 +131,9 @@ main()
     std::printf("FAILED MetalOps: %s\n", err.c_str());
     return 1;
   }
+  // Accelerated mode: created with want=false so VPIPE_I8_GEMM
+  // decides, which is what makes an A/B here a one-variable run.
+  ops.enable_i8_gemm(false);
 
   // The shapes of a 1024x1024 render: 1024 image tokens, a ~261-token
   // text prefix, so attention runs 1024 queries against 1285 keys.

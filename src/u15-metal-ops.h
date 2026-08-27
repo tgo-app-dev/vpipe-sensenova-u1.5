@@ -17,8 +17,15 @@
 #include "apple-silicon/metal-compute/metal-compute.h"
 #include "apple-silicon/metal-compute/shared-buffer.h"
 
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace vpipe {
+namespace genai {
+class I8GemmContext;    // fwd (generative-models/shared/i8-gemm.h)
+}
+}
 
 namespace u15 {
 
@@ -50,7 +57,44 @@ struct QWeight {
 
 class MetalOps {
  public:
+  MetalOps();
+  // Out of line, because `_i8` is a unique_ptr to a type this header
+  // only forward-declares: the implicit destructor would need it
+  // complete in every TU that destroys a MetalOps.
+  ~MetalOps();
+  MetalOps(const MetalOps&)            = delete;
+  MetalOps& operator=(const MetalOps&) = delete;
+
   bool init(vpipe::metal_compute::MetalCompute* mc, std::string* err);
+
+  // ACCELERATED MODE (LOSSY, opt-in): dynamic-int8 GEMMs for the big
+  // projections in place of the bf16 matmul2d tiles. The activation and
+  // the weight are quantized to i8 on the fly with per-512-group scales
+  // and the product runs on the matrix units' int8 pipe.
+  //
+  // This model qualifies on both counts the mode needs. Its projections
+  // already reach matmul2d with a DENSE bf16 weight -- either the
+  // weight itself, or the `_w_deq` expansion a quantized one is
+  // dequant-once'd into -- which is exactly the "dense, or a dequant
+  // scratch" input I8GemmContext takes. And its shapes clear the gate:
+  // K in {4096, 12288} are whole 512-groups, so nothing is padded, and
+  // N in {4096, 6144, 24576} is far above the floor. Only M decides,
+  // against a crossover of ~1k rows.
+  //
+  // Call AFTER init(): the context needs the MetalCompute init() stored,
+  // and it loads its own kernels, so a host without them leaves the mode
+  // off however it is asked. `want=false` is a no-op. VPIPE_I8_GEMM
+  // overrides either way, which is how an A/B is run.
+  // Returns whether the mode is ON afterwards, which is not the same
+  // as `want`: env can turn it on, and a host without the kernels
+  // leaves it off. The caller logs it -- MetalOps has no session.
+  bool enable_i8_gemm(bool want);
+
+  // Drop the mode's grow-only requant scratches. For a generator that
+  // keeps its models between beats: the scratches re-grow on the next
+  // qualifying GEMM, and holding them idle crowds a downstream VAE
+  // decode on a memory-bounded box.
+  void release_i8_scratch();
 
   vpipe::metal_compute::MetalCompute* mc() const { return _mc; }
 
@@ -370,6 +414,12 @@ class MetalOps {
   // and that serialisation is the price of not holding an expansion per
   // weight.
   mutable vpipe::metal_compute::SharedBuffer _w_deq;
+
+  // Null unless accelerated mode is on AND its kernels loaded. MUTABLE
+  // for the same reason `_w_deq` is: the linear() overloads are const
+  // and this is a scratch-owning encoder helper, not state a caller can
+  // observe in the result.
+  mutable std::unique_ptr<vpipe::genai::I8GemmContext> _i8;
   vpipe::metal_compute::ComputeLibrary _lib_dequant;
   // [bits 4|8][group 32|64]
   vpipe::metal_compute::ComputeFunction _fn_dequant[2][2];

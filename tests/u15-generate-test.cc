@@ -162,6 +162,9 @@ main()
     std::printf("FAILED MetalOps: %s\n", err.c_str());
     return 1;
   }
+  // Accelerated mode: created with want=false so VPIPE_I8_GEMM
+  // decides, which is what makes an A/B here a one-variable run.
+  ops.enable_i8_gemm(false);
   auto bb = u15::U15Backbone::create(&ops, cfg, w.get(), &err);
   check(bb != nullptr, "backbone");
   auto ip = u15::ImagePath::create(&ops, cfg, w.get(), &err);

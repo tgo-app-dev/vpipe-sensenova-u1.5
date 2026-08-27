@@ -1,4 +1,6 @@
 #include "u15-metal-ops.h"
+
+#include "generative-models/shared/i8-gemm.h"
 #include "generative-models/shared/mma-tile.h"
 
 #include "u15-config.h"
@@ -256,6 +258,30 @@ MetalOps::init(MetalCompute* mc, std::string* err)
 // NO BIAS SLOT. matmul2d writes the product and nothing else, exactly
 // as the quantized path above finds, so a bias is a second pass through
 // the same bias_add() that path already uses.
+MetalOps::MetalOps()  = default;
+MetalOps::~MetalOps() = default;
+
+bool
+MetalOps::enable_i8_gemm(bool want)
+{
+  _i8.reset();
+  if (_mc == nullptr) { return false; }
+  // bf16, matching this model's element type end to end -- it loads the
+  // `_bf16` twins of the dense-GEMM and dequant kernels, and `_w_deq` is
+  // sized two bytes per element. Handing bf16 buffers to the f16 kernels
+  // would reinterpret the bits rather than fail.
+  auto ctx = std::make_unique<vpipe::genai::I8GemmContext>(_mc, want,
+                                                           /*bf16=*/true);
+  if (ctx->enabled()) { _i8 = std::move(ctx); }
+  return _i8 != nullptr;
+}
+
+void
+MetalOps::release_i8_scratch()
+{
+  if (_i8) { _i8->release_scratch(); }
+}
+
 bool
 MetalOps::linear_mma_(ComputeEncoder& enc, const SharedBuffer& x,
                       const SharedBuffer& w, const SharedBuffer* bias,
@@ -264,6 +290,22 @@ MetalOps::linear_mma_(ComputeEncoder& enc, const SharedBuffer& x,
   // N < 16 is a projector, not a GEMM: the tile is nearly all padding
   // and steel wins outright.
   if (!_use_mma2 || M < _mma_min_m || N < 16) { return false; }
+  // ACCELERATED MODE, before the bf16 tiles. Placed HERE rather than in
+  // each caller because this function is the single point both GEMM
+  // paths reach: a dense weight arrives directly, and a quantized one
+  // arrives as the `_w_deq` expansion linear_mma_q_ just wrote -- which
+  // is the "dense, or a dequant scratch" input the mode is defined on.
+  //
+  // Declines silently on a shape it cannot help (M under the ~1k
+  // crossover, K not a whole number of 512-groups), and the tiles below
+  // then run exactly as before. `enc` is untouched on a decline.
+  if (_i8 && _i8->gemm(enc, x, 0, w, y, 0, M, N, K)) {
+    // The int8 kernel has no bias slot, so the same add the tiles use
+    // runs after it -- and it must, or a biased projection silently
+    // loses its bias only in accelerated mode.
+    if (bias != nullptr) { bias_add(enc, y, *bias, M, N); }
+    return true;
+  }
   const bool wide = vpipe::genai::mma_use_wide_tile(N, K);
   const int RN = wide ? 256 : 128;   // N-region per threadgroup
   enc.set_function(wide ? _fn_dense_mma_wide : _fn_dense_mma);

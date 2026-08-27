@@ -78,6 +78,19 @@ const ConfigKey kAttrs[] = {
           "stage's `init_noise` to compare against the reference",
    .def_int = 42},
 
+  {.key = "i8_gemm", .type = ConfigType::Bool, .required = false,
+   .doc = "accelerated mode (LOSSY): dynamic-int8 GEMMs for the "
+          "backbone's big projections instead of bf16, at int8 quality. "
+          "The activation and the weight are quantized on the fly with "
+          "per-512-group scales and the product runs on the matrix "
+          "units' int8 pipe. Ignored on a box without them. It also "
+          "self-gates on ROWS -- the crossover is ~1k, so a small canvas "
+          "keeps the bf16 tiles either way -- and on how much a "
+          "contraction would have to be padded to reach a whole int8 "
+          "group, which this model never pays: its K is 4096 or 12288, "
+          "both whole 512-groups. Default false; env VPIPE_I8_GEMM "
+          "overrides",
+   .def_bool = false},
   {.key = "unload_when_idle", .type = ConfigType::String, .required = false,
    .doc = "what to do with ~32 GB of weights between beats: 'keep' (the "
           "default -- a second prompt then costs no reload), 'park' "
@@ -187,6 +200,7 @@ U15GenerateStage::U15GenerateStage(const SessionContextIntf* s,
   _params.height = (int)this->attr_int("height");
   _params.steps = (int)this->attr_int("steps");
   _params.seed = (std::uint64_t)this->attr_int("seed");
+  _i8_gemm = this->attr_bool("i8_gemm");
   bool bad_policy = false;
   _policy = vpipe::model_memory::parse_unload_policy(
       this->attr_str("unload_when_idle"), &bad_policy);
@@ -394,6 +408,21 @@ U15GenerateStage::ensure_loaded_()
   _ops = std::make_unique<MetalOps>();
   std::string err;
   if (!_ops->init(mc, &err)) { return fail("Metal init: " + err); }
+  // After init: the context needs the MetalCompute the ops just stored,
+  // and it loads its own kernels, so asking for the mode on a host that
+  // does not ship them leaves it off rather than failing the load.
+  const bool i8_on = _ops->enable_i8_gemm(_i8_gemm);
+  if (i8_on) {
+    session()->info(fmt(
+        "U15GenerateStage('{}'): accelerated mode ON -- int8 GEMMs for "
+        "the projections above ~1k rows (LOSSY)", this->id()));
+  } else if (_i8_gemm) {
+    // Asked for and not available: say so rather than running bf16
+    // silently, which reads as "the flag did nothing".
+    session()->warn(fmt(
+        "U15GenerateStage('{}'): i8_gemm was asked for but this host "
+        "ships no int8 GEMM kernels; running bf16", this->id()));
+  }
 
   auto ws = vpipe::genai::open_weight_set(dir, session());
   if (ws == nullptr) { return fail("cannot open the weight set"); }

@@ -100,6 +100,10 @@ private:
 
   std::string _hf_dir;
   GenParams   _params;
+  // Accelerated mode, handed to MetalOps once it is initialized. Held
+  // here rather than in GenParams because it is a property of how the
+  // GEMMs run, not of the picture being asked for.
+  bool        _i8_gemm = false;
   vpipe::model_memory::UnloadPolicy _policy =
       vpipe::model_memory::UnloadPolicy::kKeep;
   // What `auto` resolved to; equal to _policy for every other value.
