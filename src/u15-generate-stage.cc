@@ -91,6 +91,35 @@ const ConfigKey kAttrs[] = {
           "both whole 512-groups. Default false; env VPIPE_I8_GEMM "
           "overrides",
    .def_bool = false},
+  // THE SAME WORDS generative-models/shared/accel-settings.h uses, and
+  // deliberately: this stage owns its own config -- it is not
+  // generate-video, so no acceleration bag reaches it -- but a user who
+  // knows the key on one should not have to learn a second name for the
+  // same tier here.
+  {.key = "sage_attn", .type = ConfigType::Bool, .required = false,
+   .doc = "accelerated mode (LOSSY): SageAttention, the flash "
+          "attention's QK^T product in int8 with one scale per "
+          "attention block and the key side quantized as K - mean(K) "
+          "over tokens. That smoothing is exact rather than "
+          "approximate -- a per-channel shift moves every score in a "
+          "row by the same amount and softmax does not see it -- and "
+          "P*V stays in bf16. It reaches the BIDIRECTIONAL pass, which "
+          "is the one that runs on the flash kernel; the causal and "
+          "block-causal branches take their own kernels and are "
+          "unaffected. Matrix cores only, and ignored with a message "
+          "on a box without them: the int8 fragment MMA has no ALU "
+          "fallback. Independent of i8_gemm and settable with it -- "
+          "that one changes how a weight is multiplied, this one how a "
+          "score is computed. Default false; env VPIPE_SAGE_ATTN "
+          "overrides",
+   .def_bool = false},
+  {.key = "sage_dense_layers", .type = ConfigType::Int, .required = false,
+   .doc = "leading backbone layers left in bf16 when sage_attn is on. "
+          "Zero by default: Sage computes every key and every query, so "
+          "unlike a method that DROPS keys there is no published reason "
+          "to protect an early layer's less redundant residual stream. "
+          "It exists so a caller who measures one can act on it",
+   .def_int = 0},
   {.key = "unload_when_idle", .type = ConfigType::String, .required = false,
    .doc = "what to do with ~32 GB of weights between beats: 'keep' (the "
           "default -- a second prompt then costs no reload), 'park' "
@@ -201,6 +230,8 @@ U15GenerateStage::U15GenerateStage(const SessionContextIntf* s,
   _params.steps = (int)this->attr_int("steps");
   _params.seed = (std::uint64_t)this->attr_int("seed");
   _i8_gemm = this->attr_bool("i8_gemm");
+  _sage_attn = this->attr_bool("sage_attn");
+  _sage_dense_layers = (int)this->attr_int("sage_dense_layers");
   bool bad_policy = false;
   _policy = vpipe::model_memory::parse_unload_policy(
       this->attr_str("unload_when_idle"), &bad_policy);
@@ -411,6 +442,32 @@ U15GenerateStage::ensure_loaded_()
   // After init: the context needs the MetalCompute the ops just stored,
   // and it loads its own kernels, so asking for the mode on a host that
   // does not ship them leaves it off rather than failing the load.
+  // SAGE FIRST, because a refusal here is fatal and there is no reason
+  // to have built anything before finding out. `load_for_model`
+  // distinguishes "asked, and this box has no matrix cores" -- which is
+  // a decline, said once, and not a failure -- from "asked, and the
+  // kernels would not build", which is: an image that ran bf16 under a
+  // config asking for Sage would be reported as a Sage run and its
+  // numbers believed.
+  {
+    vpipe::genai::sage::Config sc;
+    sc.enabled = _sage_attn;
+    sc.dense_layers = _sage_dense_layers;
+    std::string serr;
+    if (!_ops->set_sage(sc, &serr)) {
+      return fail("sage_attn: " + serr);
+    }
+    if (_ops->sage_config().enabled) {
+      session()->info(fmt(
+          "U15GenerateStage('{}'): SageAttention ON -- the QK product in "
+          "int8, {} leading layers in bf16 (LOSSY)", this->id(),
+          _ops->sage_config().dense_layers));
+    } else if (_sage_attn) {
+      session()->warn(fmt(
+          "U15GenerateStage('{}'): sage_attn was asked for and is not "
+          "active here; the attention runs bf16", this->id()));
+    }
+  }
   const bool i8_on = _ops->enable_i8_gemm(_i8_gemm);
   if (i8_on) {
     session()->info(fmt(

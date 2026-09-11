@@ -262,10 +262,46 @@ Turn any of it off to measure it:
     VPIPE_U15_MMA_MIN_M=N      dense row floor (default 1)
     VPIPE_U15_MMA_Q_MIN_M=N    quantized row floor (default 96)
 
+### The two lossy tiers, and they compose
+
+Everything above is the same arithmetic through different hardware. These
+two are not: both are **opt-in and off by default**, because each trades
+a little precision for speed, and which images that is acceptable on is a
+judgement about the model rather than about the kernel.
+
+| key | what it changes |
+|---|---|
+| `i8_gemm` | how a **weight is multiplied**: the backbone's big projections in dynamic int8 with per-512-group scales, instead of bf16. Self-gates on rows — the crossover is ~1k. |
+| `sage_attn` | how a **score is computed**: the flash attention's QK^T product in int8, with one scale per attention block and the key side quantized as `K − mean(K)` over tokens. `P·V` stays in bf16. |
+
+They act on different halves of a layer and neither reads the other's
+state, so both can be on at once.
+
+**Sage reaches the bidirectional pass and nothing else**, which is a fact
+about this port rather than about the method: the causal and block-causal
+branches take their own kernels, and the int8 twin is a function constant
+on the flash kernel. Its smoothing is exact rather than approximate — a
+per-channel shift moves every score in a row by the same amount, and
+softmax does not see it — so nothing is added back afterwards.
+
+`sage_dense_layers` (default 0) leaves a prefix of the backbone in bf16.
+Zero rather than one: Sage computes every key and every query, so unlike
+a method that *drops* keys there is no published reason to protect an
+early layer's less redundant residual stream.
+
+Both need matrix cores. Asked for on a box without them, each declines
+with a message and the model runs bf16 — the graph still runs, and the
+same graph runs on both boxes.
+
+    VPIPE_SAGE_ATTN=0|1        override sage_attn either way
+    VPIPE_I8_GEMM=0|1          override i8_gemm either way
+
 ## Knobs
 
 On the generate stage: `width`, `height`, `steps`, `seed`, `hf_dir`,
-`unload_when_idle`.
+`unload_when_idle`, and the two lossy accelerated tiers `i8_gemm` and
+`sage_attn` (+ `sage_dense_layers`) — see
+[Matrix cores](#matrix-cores-m5-and-newer).
 
 On `sensenova-u1.5-model-config`: `cfg_scale` (4.0 in the reference's
 examples; 1 disables guidance and halves the cost), `timestep_shift` (3.0),

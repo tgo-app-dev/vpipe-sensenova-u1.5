@@ -14,6 +14,15 @@ Apple Silicon, through vpipe's metal-compute backend.
 
 Text-to-image and image editing, both through one stage.
 
+## Start here
+
+**[docs/SENSENOVA-U1.5.md](docs/SENSENOVA-U1.5.md)** — how to fetch the
+checkpoint, size a render, quantize it, and what every knob does. Five
+ready-to-run graphs live in [docs/pipelines/](docs/pipelines/): text-to-image,
+image edit, multi-reference edit, a live preview, and the 8-bit preparation.
+Read that first; the rest of this file is what the port is made of and how it
+was checked.
+
 ## What this model is
 
 Not a diffusers pipeline. There is **no VAE**, no ViT tower, and no
@@ -43,7 +52,10 @@ cmake --build build -j
 ```
 
 A plugin must be built against the vpipe it deploys with — the ABI handshake is
-strict equality. This needs ABI ≥ 2.
+strict equality, so the requirement is **exactly the ABI of that vpipe**, never
+a minimum. That is **3** today. The number moves whenever the host's plugin
+surface does, and a plugin built against an older one is refused at load rather
+than crashed.
 
 ## Run
 
@@ -59,8 +71,12 @@ Set `hf_dir` in the pipeline to the checkpoint directory, or wire a
 
 | stage | what |
 |---|---|
-| `sensenova-u1.5-generate` | prompt → image, and prompt + reference image(s) → edited image. Owns prefill, denoise and the pixel head; emits a planar U8 RGB `TensorBeat` tagged `rgb-frames`, the same payload `vae-decode` produces, so the stock `save-image` / `compare-image` consume it unchanged. |
-| `sensenova-u1.5-model-config` | the sampling knobs that are this family's own: `cfg_scale`, `img_cfg_scale`, `cfg_norm`, `timestep_shift`, `cfg_interval`, `t_eps`. |
+| `sensenova-u1.5-generate` | prompt → image, and prompt + reference image(s) → edited image. Owns prefill, denoise and the pixel head; emits a planar U8 RGB `TensorBeat` tagged `rgb-frames`, the same payload `vae-decode` produces, so the stock `save-image` / `compare-image` consume it unchanged. Its own keys are the geometry and the run: `hf_dir`, `width`, `height`, `steps`, `seed`, `unload_when_idle`, and the two acceleration flags below. |
+| `sensenova-u1.5-model-config` | the sampling knobs that are this family's own: `cfg_scale`, `img_cfg_scale`, `cfg_norm`, `timestep_shift`, `cfg_interval_lo`, `cfg_interval_hi`, `t_eps`, `init_noise`. |
+
+`hf_dir` also joins the host's **shared-model channel**, so a `model-select`
+source feeding a graph fills this field in the composer's picker the way it
+fills every other family's.
 
 ### Editing
 
@@ -74,6 +90,31 @@ Reference images enter as *understanding* tokens, so the prefill runs under
 mask-free causal kernel used for text-only prefixes would attend only the
 earlier half of each image). `img_cfg_scale > 1` adds a third prefix and a third
 forward per step.
+
+## Accelerated modes
+
+Two lossy tiers on the generate stage, **both off by default**, and
+independent of each other: `i8_gemm` changes how a weight is multiplied,
+`sage_attn` how a score is computed. `sage_dense_layers` leaves a prefix of
+the backbone in bf16. `docs/SENSENOVA-U1.5.md` has what each one does and the
+env overrides.
+
+**Matrix cores are the whole condition for both.** The int8 fragment MMA has
+no ALU fallback, so on a box without them the tier declines with a message and
+the model runs bf16 — which is why nothing here is measured on the M4 Pro.
+
+MEASURED on the M5 through `u15-perf-test` at 4096 tokens, interleaved
+off/on/off/on: **148.0 / 147.8 ms per layer off against 100.9 / 102.1 on**,
+a **1.46x** on the projections, with the attention arm unchanged at 28 ms
+either way — which is what says the GEMMs moved and not the clock. **End to
+end it does not show** on a 16 GB box (55–56 s either way at 1024²): the
+33 GB checkpoint streams per pass at 1.31 GB resident, so the run is
+read-bound and the compute win hides behind the I/O. The pipeline-level
+number wants the 64 GB box with the model preloaded.
+
+Sage reaches the **bidirectional pass and nothing else** here — the causal and
+block-causal branches take their own kernels, and the int8 twin is a function
+constant on the flash one.
 
 ## Cost
 
@@ -156,17 +197,22 @@ runs.
 | `u15-prompt` | tokenisation and the chat template, **exactly** | the reference's own `AutoTokenizer` |
 | `u15-weights` | tensor names, shapes, the dtype split, and that the two experts are distinct | the real checkpoint |
 | `u15-kernels` | the plugin's kernels **and this code's use of libvpipe's** | the CPU reference |
+| `u15-sage` | the int8 attention PLAN — which kernel a shape resolves to, with which tiles, remembering which strides | itself, deliberately: no checkpoint, so it runs everywhere. On a GPU without matrix cores what it proves is that asking for a tier that cannot run changed nothing |
 | `u15-image` | patch embedder and pixel head at full width | the CPU reference, real weights |
 | `u15-layer0` | one MoT layer, both experts, 4096 wide | the CPU reference, real weights |
 | `u15-generate` | end to end, text-to-image | structural properties of the image |
 | `u15-edit` | end to end, editing | two different references through one prompt and one seed must give different images |
 | `u15-stream` | layer streaming and the stream/preload verdict | the preloaded render, **bit for bit** |
-| `u15-io-bench` | mmap+memcpy against pread, per drive | reports rates; asserts only that the arms read the same bytes |
 | `u15-perf` | where the time goes, at real shapes | reports rates; asserts only that a fast kernel is not slower than the one it replaced |
 | `u15-quant` | a quantized pack | one render from each of the dense and quantized packs, same prompt and seed |
 
 Tests gate on env vars and **skip vacuously** when unset — read the output, not
 the exit code. Each says which it did.
+
+Two more targets **build but are not registered with ctest**, because neither
+asserts anything a CI run should gate on: `u15-io-bench` times mmap+memcpy
+against pread per drive, and `u15-m5-test` reports what a matrix-core GPU
+offers. Run them by hand from `build/`.
 
 ## Not implemented
 
@@ -185,6 +231,11 @@ sampling loop.
 reproduced here, so the same seed gives a different sample. The generate stage's
 `init_noise` key exists as the injection point that would make an image-level
 comparison meaningful.
+
+**An end-to-end number for the accelerated tiers.** `i8_gemm` is measured per
+layer on the M5 and `sage_attn` only as a plan; neither has a pipeline-level
+figure, and neither has been checked against the golden render. That is why
+both default to false.
 
 **Prefetch overlap while streaming.** A streamed layer is read, used, and only
 then is the next one read, so the read is serial with the compute. Overlapping

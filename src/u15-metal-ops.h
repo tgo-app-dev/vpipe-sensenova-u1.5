@@ -16,6 +16,7 @@
 #include "apple-silicon/metal-compute/compute-encoder.h"
 #include "apple-silicon/metal-compute/metal-compute.h"
 #include "apple-silicon/metal-compute/shared-buffer.h"
+#include "generative-models/shared/metal-sage-attention.h"
 
 #include <memory>
 #include <string>
@@ -242,8 +243,25 @@ class MetalOps {
   // read past every row.
   struct SteelAttn {
     vpipe::metal_compute::ComputeFunction fn;
+    // The SAME kernel with constant 306 true: SageAttention's int8 QK
+    // twin. Built beside the f16 one, not instead of it, because
+    // `sage_dense_layers` leaves a prefix of the stack on the f16
+    // kernel and one pass therefore dispatches both.
+    //
+    // Built from what the GPU CAN do rather than from what the config
+    // asked. A plan is cached per pass shape and outlives a beat, where
+    // the setting is per beat -- so a twin conditioned on the setting
+    // would be missing for every later beat that turned the tier on
+    // after one that had it off, and that image would render dense with
+    // the log saying otherwise.
+    vpipe::metal_compute::ComputeFunction fn_i8;
     vpipe::metal_compute::SharedBuffer    params;
     int heads = 0, tq = 0, tkv = 0, head_dim = 0, bq = 0;
+    // What Sage needs and the f16 dispatch does not have to remember:
+    // the KEY head count (this model is GQA) and the cache CAPACITY,
+    // which is the K head stride and is NOT tkv. The quantizer walks the
+    // same bytes the kernel does, so it needs the same three numbers.
+    int heads_kv = 0, bk = 0, kv_stride = 0;
     bool valid() const { return fn.valid() && !params.empty(); }
   };
 
@@ -262,12 +280,47 @@ class MetalOps {
   bool steel_attn_plan(SteelAttn* p, int heads_q, int heads_kv, int tq,
                        int tkv, int head_dim, int kv_stride_tokens) const;
 
+  // `sage_layer` is the stack index when the caller will accept
+  // SageAttention here and -1 when it will not. When the tier is live
+  // and the layer is past `sage_dense_layers`, the int8 prologue is
+  // encoded HERE -- into the same encoder, immediately before the
+  // dispatch that reads what it wrote, which is the whole of the
+  // ordering between them.
   void sdpa_steel(vpipe::metal_compute::ComputeEncoder& enc,
                   const SteelAttn& p,
                   const vpipe::metal_compute::SharedBuffer& q,
                   const vpipe::metal_compute::SharedBuffer& k,
                   const vpipe::metal_compute::SharedBuffer& v,
-                  const vpipe::metal_compute::SharedBuffer& out) const;
+                  const vpipe::metal_compute::SharedBuffer& out,
+                  int sage_layer = -1) const;
+
+  // ---- SageAttention -------------------------------------------------
+  //
+  // The QK^T product of the flash attention in INT8, with one scale per
+  // attention block and the key side quantized as K - mean(K) over
+  // tokens. That smoothing is exact rather than approximate: a
+  // per-channel shift moves every score in a row by the same amount and
+  // softmax does not see it. P*V stays in bf16.
+  //
+  // IT REACHES THE BIDIRECTIONAL PASS AND NOTHING ELSE, which is not a
+  // property of the method but of this port: the causal and
+  // block-causal branches do not run on the steel kernel at all, and
+  // the int8 twin is that kernel's function constant.
+  //
+  // MATRIX CORES ARE THE WHOLE CONDITION -- the int8 fragment MMA has
+  // no ALU fallback -- so this declines on a box without them and the
+  // model runs bf16. `err` is set only when the tier was asked for and
+  // its kernels would not build, which is a refusal rather than a
+  // decline.
+  bool set_sage(const vpipe::genai::sage::Config& cfg, std::string* err);
+  bool sage_takes(int head_dim) const noexcept;
+  void sage_lend(const vpipe::metal_compute::SharedBuffer& a,
+                 const vpipe::metal_compute::SharedBuffer& b) const;
+  std::size_t sage_resident_bytes() const noexcept;
+  const vpipe::genai::sage::Config& sage_config() const noexcept
+  {
+    return _sage_cfg;
+  }
 
   // BLOCK-CAUSAL attention: attend iff t[j] == t[i] or j <= i. Needed
   // once a reference image is in the prefix, where several tokens share
@@ -420,6 +473,12 @@ class MetalOps {
   // and this is a scratch-owning encoder helper, not state a caller can
   // observe in the result.
   mutable std::unique_ptr<vpipe::genai::I8GemmContext> _i8;
+
+  // SageAttention's driver and the settings it was built from. mutable
+  // for the reason `_i8` is: every dispatch helper here is const and
+  // this one allocates on first sight of a geometry.
+  mutable std::unique_ptr<vpipe::genai::MetalSageAttention> _sage;
+  vpipe::genai::sage::Config _sage_cfg;
   vpipe::metal_compute::ComputeLibrary _lib_dequant;
   // [bits 4|8][group 32|64]
   vpipe::metal_compute::ComputeFunction _fn_dequant[2][2];

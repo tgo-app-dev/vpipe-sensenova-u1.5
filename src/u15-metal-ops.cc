@@ -764,20 +764,112 @@ MetalOps::steel_attn_plan(SteelAttn* p, int heads_q, int heads_kv, int tq,
                                            : "attn_steel_h_bd64_bf16", fc);
   if (!p->fn.valid()) { return false; }
 
+  // AND THE INT8 TWIN, whenever this GPU could ever run it. See the note
+  // on SteelAttn::fn_i8 for why the condition is the hardware and not
+  // the setting.
+  if (nax && vpipe::genai::MetalSageAttention::available(_mc)) {
+    vpipe::metal_compute::FunctionConstants fi = fc;
+    fi.set_bool(vpipe::genai::sage::kQkInt8Constant, true);
+    p->fn_i8 = _lib_attn_nax.function(
+        head_dim == 128 ? "attn_steel_nax_h_bd128_bf16"
+                        : "attn_steel_nax_h_bd64_bf16", fi);
+  } else {
+    p->fn_i8 = vpipe::metal_compute::ComputeFunction{};
+  }
+
   p->heads = heads_q;
   p->tq = tq;
   p->tkv = tkv;
   p->head_dim = head_dim;
   p->bq = bq;
+  p->heads_kv = heads_kv;
+  p->bk = bk;
+  p->kv_stride = kv_stride_tokens;
   return true;
+}
+
+bool
+MetalOps::set_sage(const vpipe::genai::sage::Config& cfg, std::string* err)
+{
+  _sage_cfg = cfg;
+  if (const char* e = std::getenv("VPIPE_SAGE_ATTN")) {
+    _sage_cfg.enabled = (*e != '0');
+  }
+  _sage.reset();
+  if (!_sage_cfg.enabled || _mc == nullptr) { return true; }
+  bool fatal = false;
+  _sage = vpipe::genai::MetalSageAttention::load_for_model(
+      _mc, /*bf16=*/true, _sage_cfg, "sensenova-u1.5", &fatal);
+  if (!_sage) {
+    // OFF rather than half on, so sage_takes() cannot say yes to a tier
+    // with no driver behind it. The caller still holds what it asked
+    // for, which is what a log line about the decline needs.
+    _sage_cfg.enabled = false;
+    if (fatal) {
+      if (err != nullptr) {
+        *err = "the int8 attention kernels would not build";
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool
+MetalOps::sage_takes(int head_dim) const noexcept
+{
+  return (bool)_sage && _sage_cfg.enabled && _use_nax &&
+         _lib_attn_nax.valid() && steel_attn_available(head_dim);
+}
+
+void
+MetalOps::sage_lend(const SharedBuffer& a, const SharedBuffer& b) const
+{
+  if (_sage) { _sage->set_arena(a, b); }
+}
+
+std::size_t
+MetalOps::sage_resident_bytes() const noexcept
+{
+  return _sage ? _sage->resident_bytes() : 0;
 }
 
 void
 MetalOps::sdpa_steel(ComputeEncoder& enc, const SteelAttn& p,
                      const SharedBuffer& q, const SharedBuffer& k,
-                     const SharedBuffer& v, const SharedBuffer& out) const
+                     const SharedBuffer& v, const SharedBuffer& out,
+                     int sage_layer) const
 {
-  enc.set_function(p.fn);
+  // THE INT8 PROLOGUE, into this encoder and immediately before the
+  // dispatch that reads what it wrote. The encoder is serial, so that
+  // ordering is the whole synchronisation between them.
+  //
+  // The tile check is not paranoia: the scales are one per the ATTENTION
+  // kernel's own tiles, so a prologue sized against different numbers
+  // than the kernel indexes with would read past its scale arrays. These
+  // are the same numbers by construction -- Sage only runs on the NAX
+  // plan, whose tiles are 64/32 -- and asking is what keeps that true if
+  // either side ever moves.
+  bool i8 = false;
+  if (sage_layer >= 0 && p.fn_i8.valid() && (bool)_sage &&
+      sage_layer >= _sage_cfg.dense_layers &&
+      p.bq == vpipe::genai::MetalSageAttention::nax_query_block() &&
+      p.bk == vpipe::genai::MetalSageAttention::nax_key_block()) {
+    using Operand = vpipe::genai::MetalSageAttention::Operand;
+    // THE SAME THREE NUMBERS THE PARAMS BLOCK CARRIES, and the K head
+    // stride is the cache CAPACITY rather than the key length -- the
+    // quantizer walks the bytes the kernel walks, so deriving that from
+    // `tkv` would quantize the wrong heads and do it silently.
+    const Operand qo{&q, 0, p.head_dim, p.tq * p.head_dim};
+    const Operand ko{&k, 0, p.head_dim, p.kv_stride * p.head_dim};
+    std::string serr;
+    // K is quantized once per KEY head, not once per query head: the
+    // kernel indexes it the same way it indexes the f16 K, through the
+    // GQA group size.
+    i8 = _sage->prepare(enc, qo, ko, p.heads, p.heads_kv, p.tq, p.tkv,
+                        p.head_dim, p.bq, p.bk, _sage_cfg, &serr);
+  }
+  enc.set_function(i8 ? p.fn_i8 : p.fn);
   enc.set_buffer(0, q);
   enc.set_buffer(1, k);
   enc.set_buffer(2, v);
@@ -786,6 +878,7 @@ MetalOps::sdpa_steel(ComputeEncoder& enc, const SteelAttn& p,
   // Slots 5/6 (mask, sinks) are guarded by function constants 300/302
   // and are not declared in this specialisation, so binding them would
   // be binding arguments the pipeline does not have.
+  if (i8) { _sage->bind(enc); }        // 15..18, and only on the twin
   enc.dispatch({32 * (unsigned)((p.tq + p.bq - 1) / p.bq),
                 4 * (unsigned)p.heads, 1}, {32, 4, 1});
 }

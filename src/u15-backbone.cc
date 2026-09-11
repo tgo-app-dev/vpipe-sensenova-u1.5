@@ -205,8 +205,15 @@ U15Backbone::layer_step_(CommandStream& stream, const MotLayer& L,
     // SDPA writes HEAD-major [NH][n][HD]; o_proj is a GEMM over token
     // rows, so the output is turned back token-major in between.
     if (steel != nullptr) {
+      // SAGE LENDS FROM THE TWO PLANES THE TRANSPOSES JUST EMPTIED.
+      // `_q` went into `_qh` and `_v` into the cache a few lines above,
+      // and neither is read again until the next layer's projections
+      // rewrite them -- the MLP below uses its own. Anything that does
+      // not fit is allocated privately, per buffer, so this is a saving
+      // rather than a requirement.
+      if (_ops->sage_takes(HD)) { _ops->sage_lend(_q, _v); }
       _ops->sdpa_steel(enc, *steel, _qh, kv.k[(std::size_t)li],
-                       kv.v[(std::size_t)li], _attn);
+                       kv.v[(std::size_t)li], _attn, li);
     } else if (attn == Attn::BlockCausal) {
       _ops->sdpa_block_causal(enc, _qh, kv.k[(std::size_t)li],
                               kv.v[(std::size_t)li], _attn, *s.t_index, NH,

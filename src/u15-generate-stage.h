@@ -104,6 +104,11 @@ private:
   // here rather than in GenParams because it is a property of how the
   // GEMMs run, not of the picture being asked for.
   bool        _i8_gemm = false;
+  // SageAttention, the second accelerated tier. Independent of
+  // `_i8_gemm` beside it and settable with it: that one changes how
+  // a weight is multiplied, this one how a score is computed.
+  bool _sage_attn{};
+  int  _sage_dense_layers{};
   vpipe::model_memory::UnloadPolicy _policy =
       vpipe::model_memory::UnloadPolicy::kKeep;
   // What `auto` resolved to; equal to _policy for every other value.

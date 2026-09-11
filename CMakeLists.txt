@@ -9,8 +9,11 @@ project(vpipe_sensenova_u1_5 LANGUAGES CXX)
 #
 # A plugin must be rebuilt against the vpipe it deploys with: the ABI
 # handshake is strict equality, so a mismatch is refused at load rather
-# than crashing. This plugin needs ABI >= 2 (register_stage with a spec +
-# register_catalog_entries + register_metal_library).
+# than crashing. This plugin needs ABI 3 -- exactly, not "or newer".
+# The number moves whenever the host's plugin surface does, and this
+# plugin tracks it by REBUILDING rather than by source change: it is an
+# image family with its own stage, so the host's video-registry structs
+# never reach it.
 find_package(vpipe REQUIRED)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -144,6 +147,22 @@ if(NOT MSVC)
     target_compile_options(u15-kernels-test PRIVATE -Wall -Werror)
 endif()
 add_test(NAME u15-kernels COMMAND u15-kernels-test)
+
+# SageAttention wired into the backbone. Asserts the PLAN rather than the
+# arithmetic, so it needs no checkpoint -- and says on every run which
+# half of itself the GPU let it check.
+add_executable(u15-sage-test
+    tests/u15-sage-test.cc
+    src/u15-metal-ops.cc
+    $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
+target_include_directories(u15-sage-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(u15-sage-test PRIVATE vpipe::vpipe)
+target_compile_features(u15-sage-test PRIVATE cxx_std_20)
+if(NOT MSVC)
+    target_compile_options(u15-sage-test PRIVATE -Wall -Werror)
+endif()
+add_test(NAME u15-sage COMMAND u15-sage-test)
 
 # Layer 0 of the REAL checkpoint on the GPU, against the CPU reference at
 # full width. The check that says the whole chain holds.
