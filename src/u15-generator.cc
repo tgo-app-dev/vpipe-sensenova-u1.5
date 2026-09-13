@@ -153,6 +153,7 @@ Generator::generate(const std::string& prompt,
                     const std::vector<RefImage>& refs, const GenParams& p,
                     std::vector<std::uint8_t>* out_u8,
                     const std::function<void(int, int)>& progress,
+                    const std::function<bool()>& stop,
                     std::string* err)
 {
   const auto fail = [err](const std::string& m) {
@@ -449,10 +450,26 @@ Generator::generate(const std::string& prompt,
                            _cfg.gen.patch_size * _cfg.gen.patch_size);
   std::vector<float> x_pred((std::size_t)H * W * 3);
 
+  // THE PREDICATE REACHES THE LAYER LOOP, not just this one. A step here
+  // is one read of the 42-layer checkpoint on a streamed model, so a
+  // check only between steps leaves the Stop button doing nothing for
+  // the length of one -- minutes at a large geometry. Cleared on every
+  // exit: the backbone outlives this call, and a dangling predicate
+  // capturing a stage's context would be read on the next run.
+  struct StopGuard {
+    U15Backbone* b;
+    ~StopGuard() { b->set_stop({}); }
+  } stop_guard{_d.backbone};
+  _d.backbone->set_stop(stop);
+
   const double ns_ratio =
       noise_scale / std::max(1e-9, _cfg.gen.noise_scale_max_value);
 
   for (int step = 0; step < p.steps; ++step) {
+    if (stop && stop()) {
+      if (err != nullptr) { *err = kStopped; }
+      return false;
+    }
     if (progress) { progress(step, p.steps); }
     const double t = (double)ts[(std::size_t)step];
     const double t_next = (double)ts[(std::size_t)step + 1];

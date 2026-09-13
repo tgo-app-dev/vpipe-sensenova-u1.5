@@ -193,7 +193,7 @@ main()
     check(L.weights->quant_bits() == 0,
           "the dense pack reports no quantization");
     const auto t1 = std::chrono::steady_clock::now();
-    check(L.gen->generate(kPrompt, no_refs, gp, &dense_img, nullptr, &err),
+    check(L.gen->generate(kPrompt, no_refs, gp, &dense_img, nullptr, {}, &err),
           "dense render");
     dense_s = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t1).count();
@@ -219,7 +219,7 @@ main()
     check(L.ops->quant_available(),
           "the host ships the affine qmm kernels");
     const auto t1 = std::chrono::steady_clock::now();
-    check(L.gen->generate(kPrompt, no_refs, gp, &quant_img, nullptr, &err),
+    check(L.gen->generate(kPrompt, no_refs, gp, &quant_img, nullptr, {}, &err),
           "quantized render");
     quant_s = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t1).count();

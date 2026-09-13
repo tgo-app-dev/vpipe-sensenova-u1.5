@@ -19,7 +19,8 @@
 //
 // Notably NOT used: register_vae_family (there is no VAE) and
 // register_video_family (this is an image model). No host change was
-// needed to ship this plugin -- ABI 2 as it stands was sufficient.
+// needed to ship this plugin -- the plugin surface of ABI 4 is
+// sufficient.
 //
 // The model weights are Apache-2.0, as is this plugin.
 

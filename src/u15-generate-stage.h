@@ -92,6 +92,13 @@ private:
   bool ensure_loaded_();
   void unload_();
 
+  // Move the ledger to the checkpoint `_hf_dir` now names, after a
+  // model-port switch: release `prev_dir`'s claim and declare the new
+  // one BEFORE it loads. revise_declaration() refuses to create an
+  // entry, so a checkpoint nobody declared would otherwise never be
+  // counted at all.
+  void switch_declaration_(const std::string& prev_dir);
+
   // Resolve `auto` from the box, once, after the first beat -- where
   // every peer has loaded and real bytes are authoritative. Before the
   // init barrier the answer would be taken against whatever happened to

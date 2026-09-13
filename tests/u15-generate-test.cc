@@ -193,7 +193,7 @@ main()
         std::printf("\r       step %d/%d ", s, n);
         std::fflush(stdout);
       },
-      &err);
+      {}, &err);
   const double gen_s = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - g0).count();
   std::printf("\r                    \r");
@@ -244,7 +244,7 @@ main()
     one.steps = 1;
     std::vector<std::uint8_t> img1;
     if (gen->generate(prompt_text, no_refs, one, &img1, nullptr,
-                      &err)) {
+                      {}, &err)) {
       std::size_t same = 0;
       for (std::size_t i = 0; i < img.size(); ++i) {
         if (img[i] == img1[i]) { ++same; }
@@ -264,7 +264,7 @@ main()
   {
     std::vector<std::uint8_t> other;
     if (gen->generate("a solid black square on a white background",
-                      no_refs, gp, &other, nullptr, &err)) {
+                      no_refs, gp, &other, nullptr, {}, &err)) {
       double d = 0.0;
       for (std::size_t i = 0; i < img.size(); ++i) {
         d += std::fabs((double)img[i] - (double)other[i]);

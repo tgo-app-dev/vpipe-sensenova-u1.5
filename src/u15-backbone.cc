@@ -35,6 +35,22 @@ U15Backbone::create(MetalOps* ops, const U15Config& cfg, U15Weights* w,
   return b;
 }
 
+// THE ARENA GOES BACK TO THE POOL WITH THE BACKBONE. forward_many() wires
+// it and ensure_scratch_() unwires it before REPLACING it, and destroying
+// it is the same case: freeing a wired buffer unwires it in the kernel
+// but does not decrement the pool's counter, which only
+// unwire_from_pool() does. The stage destroys the backbone on every
+// unload, the park branch included, so without this each idle cycle
+// would leak an arena's worth of the budget for the rest of the run.
+//
+// Through the weights, which hold the pool handle, so they must outlive
+// this: the stage resets the backbone before them, and every holder
+// declares the weights first so member destruction agrees.
+U15Backbone::~U15Backbone()
+{
+  if (_w != nullptr) { _w->unwire_scratch(scratch_buffers()); }
+}
+
 std::size_t
 U15Backbone::kv_bytes(int capacity) const
 {
@@ -368,6 +384,17 @@ U15Backbone::forward_many(CommandStream& stream,
   } read_join{_w};
   CommandStream::Fence fence;
   for (int li = 0; li < n_layers; ++li) {
+    // THE COOPERATIVE STOP, before the layer's weights are asked for.
+    // Here rather than between forwards because on a streamed model one
+    // forward IS the checkpoint: at 1024 square the stack is minutes,
+    // and a Stop noticed only at the end of it is a Stop that appears
+    // not to work. The ReadJoin guard above makes this early return
+    // safe -- a prefetch may be filling a slot, and leaving while a
+    // reader writes into it is a use-after-free.
+    if (_stop && _stop()) {
+      if (err != nullptr) { *err = kStopped; }
+      return false;
+    }
     const MotLayer* L = _w->layer(li, err);
     if (L == nullptr) { return false; }
 

@@ -53,7 +53,7 @@ cmake --build build -j
 
 A plugin must be built against the vpipe it deploys with — the ABI handshake is
 strict equality, so the requirement is **exactly the ABI of that vpipe**, never
-a minimum. That is **3** today. The number moves whenever the host's plugin
+a minimum. That is **4** today. The number moves whenever the host's plugin
 surface does, and a plugin built against an older one is refused at load rather
 than crashed.
 

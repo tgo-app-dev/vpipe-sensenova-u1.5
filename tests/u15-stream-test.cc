@@ -183,7 +183,7 @@ main()
     check(L.weights->resident_layers() == n_layers,
           "with all " + std::to_string(n_layers) + " layers held");
     const auto t0 = std::chrono::steady_clock::now();
-    check(L.gen->generate(kPrompt, no_refs, gp, &pre_img, nullptr, &err),
+    check(L.gen->generate(kPrompt, no_refs, gp, &pre_img, nullptr, {}, &err),
           std::string("preloaded render") +
               (err.empty() ? "" : " (" + err + ")"));
     pre_s = std::chrono::duration<double>(
@@ -212,7 +212,7 @@ main()
           "holding only the " + std::to_string(pinned) +
               " pinned layers at load");
     const auto t0 = std::chrono::steady_clock::now();
-    check(L.gen->generate(kPrompt, no_refs, gp, &str_img, nullptr, &err),
+    check(L.gen->generate(kPrompt, no_refs, gp, &str_img, nullptr, {}, &err),
           std::string("streamed render") +
               (err.empty() ? "" : " (" + err + ")"));
     str_s = std::chrono::duration<double>(

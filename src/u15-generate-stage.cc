@@ -8,10 +8,12 @@
 #include "interfaces/ui-delegate-intf.h"
 #include "stages/model-config-source.h"
 #include "generative-models/generative-model-manager.h"
+#include "generative-models/llama3/metal-llama-weights.h"
 #include "generative-models/weight-set.h"
 #include "stages/model-memory.h"
 #include "stages/model-registry.h"
 
+#include <cstddef>
 #include <cstring>
 #include <vector>
 #include <string>
@@ -272,6 +274,42 @@ namespace {
 // cannot disagree about what a "layer" is.
 constexpr const char* kLayerStem = "language_model.model.layers.";
 
+// Whether this stage binds the think-mode lm_head. It does not: a T2I or
+// edit run never samples text. Stated once because it decides two things
+// that must agree -- what the loader binds and what the floor counts.
+constexpr bool kWithLmHead = false;
+
+// THE FLOOR THIS STAGE DECLARES: the host's measurement, less what this
+// stage never binds.
+//
+// streaming_floor_bytes() is trunk + a slot pair, and "trunk" is every
+// tensor outside the stem -- which includes the lm_head, unbound unless
+// kWithLmHead. Its `exclude` cannot remove it: that filters names UNDER
+// the stem, and the lm_head is not under it. So the lm_head's bytes are
+// read off the same tensor table and subtracted.
+//
+// 0 still means nothing streams, and the caller falls back to a plain
+// claim as before. A subtraction that would not leave a positive floor
+// keeps the host's figure instead: over-stating costs a peer some room,
+// and a zero would read as no floor at all.
+std::size_t
+declared_floor_(const std::string& dir)
+{
+  const std::size_t floor =
+      vpipe::model_memory::streaming_floor_bytes(dir, {kLayerStem});
+  if (floor == 0 || kWithLmHead) { return floor; }
+  const auto wts = vpipe::genai::MetalLlamaWeights::open_model(dir);
+  if (!wts.has_value()) { return floor; }
+  const std::string stem = std::string(U15Weights::kLmHead) + ".";
+  std::size_t head = 0;
+  for (const std::string& nm : wts->tensor_names()) {
+    if (nm.rfind(stem, 0) != 0) { continue; }
+    const auto* ti = wts->info(nm);
+    if (ti != nullptr) { head += (std::size_t)ti->nbytes; }
+  }
+  return head < floor ? floor - head : floor;
+}
+
 // A plan-time estimate of what one beat ALLOCATES, from the config
 // alone -- no model load, so it is answerable during the planning
 // phase.
@@ -359,9 +397,9 @@ U15GenerateStage::declare_resources() const
   // everything outside the layer stack, plus the two in-flight slots a
   // streamer refills into. Declaring only the checkpoint's size would
   // tell a peer sizing after us that a 16 GB box cannot run this graph,
-  // when in fact it can -- slowly.
-  const std::size_t floor =
-      mm::streaming_floor_bytes(dir, {kLayerStem});
+  // when in fact it can -- slowly. Less the lm_head this stage never
+  // binds; see declared_floor_().
+  const std::size_t floor = declared_floor_(dir);
   if (floor > 0) {
     out.push_back(mm::weight_claim_streamable(dir, floor));
   } else {
@@ -504,6 +542,7 @@ U15GenerateStage::ensure_loaded_()
   U15Weights::Options opt;
   opt.stream_layers = plan.stream;
   opt.wire_resident = true;
+  opt.with_lm_head = kWithLmHead;   // what declared_floor_() assumed
   const BeatBytes beat =
       beat_bytes_(_cfg, _params.width, _params.height, 3);
   if (plan.stream) {
@@ -551,17 +590,18 @@ U15GenerateStage::ensure_loaded_()
 
   // REVISE the declaration down to what is actually held.
   //
-  // declare_resources() sizes from the checkpoint on DISK -- 47.9 GB --
-  // because that is all it can know before loading. But the generation
-  // expert ships F32 and is converted to bf16 at bind, so the resident
-  // set is ~31.6 GB. Leaving the declaration at the disk figure
-  // over-reserves 16 GB against every peer that sizes after this stage,
-  // on a box where that is the difference between streaming and not.
+  // declare_resources() sizes from the checkpoint on DISK, because that
+  // is all it can know before loading. What is held differs from it: a
+  // pack that ships F32 twins holds them as bf16, the think-mode lm_head
+  // is on disk and never bound, and a streaming model holds its floor.
+  // Left at the disk figure, the declaration over-reserves against every
+  // peer that sizes after this stage, on a box where that is the
+  // difference between streaming and not.
   //
   // revise_declaration refuses to CREATE, so this is only ever a
-  // correction to a claim declare_resources() already made -- a stage
-  // whose directory arrived on a port declared nothing and gets nothing
-  // here either.
+  // correction to a claim already made -- by declare_resources(), or by
+  // switch_declaration_() for a checkpoint that arrived on the model
+  // port after launch.
   if (auto* mgr = session()->services()->generative_model_manager()) {
     mgr->revise_declaration(dir, _weights->resident_bytes());
     // And the two non-weight terms, now that the geometry is settled.
@@ -632,13 +672,44 @@ U15GenerateStage::resolve_policy_()
 void
 U15GenerateStage::unload_()
 {
-  // Order matters: the generator holds raw pointers into the others.
+  // Order matters: the generator holds raw pointers into the others, and
+  // the backbone unwires its arena THROUGH the weights. The weights then
+  // unwire themselves (~U15Weights), so every caller of this gives the
+  // pool back -- not only the park branch.
   _gen.reset();
   _image.reset();
   _backbone.reset();
   _weights.reset();
   _prompt.reset();
   _ops.reset();
+}
+
+void
+U15GenerateStage::switch_declaration_(const std::string& prev_dir)
+{
+  auto* mgr = session()->services()->generative_model_manager();
+  if (mgr == nullptr) { return; }
+  const std::string dir = model_dir_();
+  // Two references that resolve to one directory are not a switch.
+  if (dir == prev_dir) { return; }
+  if (!prev_dir.empty()) {
+    // RELEASED, not left standing. There is no call that removes a
+    // claim, so it is revised to zero -- what the park branch does for a
+    // model it has let go. And the set is settled NOW rather than at the
+    // next unrelated manager call, so the streaming decision for the
+    // model about to load does not size against the old one's bytes.
+    // pool_weights() never touches a set a peer still borrows.
+    mgr->revise_declaration(prev_dir, 0);
+    mgr->pool_weights(prev_dir);
+  }
+  // Declared the way the planner declares a claim: the on-disk size, and
+  // the floor only when it is a real reduction. A directory with no
+  // weights is left undeclared, as the planner leaves an absent one.
+  const std::size_t disk = vpipe::model_memory::dir_weights_bytes(dir);
+  if (disk == 0) { return; }
+  const std::size_t floor = declared_floor_(dir);
+  mgr->declare_weights(dir, disk, std::string(), std::string(),
+                       floor < disk ? floor : 0);
 }
 
 Job
@@ -658,9 +729,15 @@ U15GenerateStage::process(RuntimeContext& ctx)
         // at all, which is what left a configured registry key going
         // straight to the filesystem as if it were a path.
         if (ref != _hf_dir) {
+          // Resolved BEFORE the latch moves: afterwards model_dir_()
+          // names the new checkpoint, and the old claim is keyed on the
+          // directory, not the reference.
+          const std::string prev =
+              _hf_dir.empty() ? std::string() : model_dir_();
           _hf_dir = ref;
           unload_();
           _load_failed = false;
+          switch_declaration_(prev);
         }
       }
     }
@@ -688,13 +765,58 @@ U15GenerateStage::process(RuntimeContext& ctx)
     }
   }
 
-  // Reference images. POLLED, not read: a text-to-image graph leaves
-  // these unwired and must not block on a beat that never comes. A
-  // wired-but-empty port means the same thing -- no reference this beat.
+  auto beat = co_await ctx.read(kPromptPort);
+  if (!beat) {
+    // EOS. signal_done() and NOT a bare co_return: the driver loops
+    // while !done(), so a stage that just returns is re-entered
+    // immediately and forever -- a full core at 100% holding 32 GB of
+    // weights.
+    unload_();
+    ctx.signal_done();
+    co_return;
+  }
+  const auto* pp = dynamic_cast<const FlexDataPayload*>(beat.get());
+  if (pp == nullptr) {
+    session()->warn(fmt("U15GenerateStage('{}'): prompt beat is not "
+                        "FlexData; dropping", this->id()));
+    co_return;
+  }
+  const std::string text = prompt_of_(pp->data);
+  if (text.empty()) {
+    session()->warn(fmt("U15GenerateStage('{}'): empty prompt; dropping",
+                        this->id()));
+    co_return;
+  }
+
+
+  // Reference images, AFTER the prompt and BLOCKING on a connected port.
+  //
+  // Both halves of that matter and the old code had neither. It polled
+  // `backlog(port) == 0` and it did so BEFORE the blocking prompt read,
+  // so on the first beat the poll ran the instant the driver scheduled
+  // this stage -- routinely before `load-image` had produced anything.
+  // The reference lost a race to the prompt, the run silently became
+  // text-to-image, and nothing was logged because the only warning on
+  // that path fires when a beat WAS read and had the wrong type. An
+  // edit that quietly ignores its reference is the worst shape this bug
+  // could take: it returns a clean, plausible picture of the wrong
+  // thing.
+  //
+  // A NON-BLOCKING POLL NEEDS AN ORDERING GUARANTEE, and there is none
+  // here. generate-image polls its negative conditioning for exactly
+  // this reason and says so: the conditioner enqueues oport1 before
+  // oport0, so the paired beat is already in the FIFO when the one it
+  // blocks on arrives. `load-image` and `text-prompt` are independent
+  // sources with nothing ordering them.
+  //
+  // So a CONNECTED port is blocked on, which is what generate-image
+  // does for its reference latents. A text-to-image graph leaves these
+  // unwired and blocks on nothing; a graph that wires one is a graph
+  // that intends to edit, and waiting for the picture is the whole of
+  // what it asked for.
   std::vector<u15::RefImage> refs;
   for (const int port : {kRefPort0, kRefPort1}) {
     if (ctx.num_iports() <= port || !ctx.iport_connected(port)) { continue; }
-    if (ctx.backlog(port) == 0) { continue; }
     auto rb = co_await ctx.read(port);
     const auto* tp =
         rb ? dynamic_cast<const TensorBeatPayload*>(rb.get()) : nullptr;
@@ -723,30 +845,10 @@ U15GenerateStage::process(RuntimeContext& ctx)
         }
       }
     }
+    session()->info(fmt(
+        "U15GenerateStage('{}'): reference{} {}x{} accepted -- this run "
+        "is an EDIT", this->id(), port - kRefPort0, rw, rh));
     refs.push_back(std::move(r));
-  }
-
-  auto beat = co_await ctx.read(kPromptPort);
-  if (!beat) {
-    // EOS. signal_done() and NOT a bare co_return: the driver loops
-    // while !done(), so a stage that just returns is re-entered
-    // immediately and forever -- a full core at 100% holding 32 GB of
-    // weights.
-    unload_();
-    ctx.signal_done();
-    co_return;
-  }
-  const auto* pp = dynamic_cast<const FlexDataPayload*>(beat.get());
-  if (pp == nullptr) {
-    session()->warn(fmt("U15GenerateStage('{}'): prompt beat is not "
-                        "FlexData; dropping", this->id()));
-    co_return;
-  }
-  const std::string text = prompt_of_(pp->data);
-  if (text.empty()) {
-    session()->warn(fmt("U15GenerateStage('{}'): empty prompt; dropping",
-                        this->id()));
-    co_return;
   }
 
   if (!ensure_loaded_()) { co_return; }
@@ -764,9 +866,20 @@ U15GenerateStage::process(RuntimeContext& ctx)
       [&prog](int step, int total) {
         prog.update((std::uint64_t)step, (std::uint64_t)total, "denoise");
       },
+      [&ctx]() { return ctx.stop_requested(); },
       &err);
   if (!ok) {
-    session()->warn(fmt("U15GenerateStage('{}'): {}", this->id(), err));
+    // A STOP IS NOT A FAILURE. Warning about it puts a line in the log
+    // that reads like something went wrong, for a run the operator
+    // ended on purpose -- and on a stage this slow that is the most
+    // likely reason a run ends early.
+    if (err == u15::Generator::kStopped) {
+      session()->info(fmt(
+          "U15GenerateStage('{}'): stopped; no image emitted",
+          this->id()));
+    } else {
+      session()->warn(fmt("U15GenerateStage('{}'): {}", this->id(), err));
+    }
     co_return;
   }
 
@@ -808,9 +921,19 @@ U15GenerateStage::process(RuntimeContext& ctx)
 
   resolve_policy_();
   switch (_idle) {
-    case vpipe::model_memory::UnloadPolicy::kDestroy:
+    case vpipe::model_memory::UnloadPolicy::kDestroy: {
       unload_();
+      // THE BYTES BACK, which letting go alone does not do: the manager
+      // owns the checkpoint and keeps an unborrowed one parked rather
+      // than freeing it. `destroy` asks for them outright, the same call
+      // generate-video makes, and only after unload_() can it succeed --
+      // drop_weights() refuses a set anything still borrows. Keyed on the
+      // directory, as the declaration is.
+      if (auto* mgr = session()->services()->generative_model_manager()) {
+        mgr->drop_weights(model_dir_());
+      }
       break;
+    }
     case vpipe::model_memory::UnloadPolicy::kPark: {
       const std::size_t held = _weights->resident_bytes();
       // UNWIRE FIRST. Wired and parked are opposites -- mark_inactive()
@@ -844,9 +967,8 @@ U15GenerateStage::process(RuntimeContext& ctx)
       // back the second -- 26497 MB of 32322 in the worked example, 82%,
       // against the ~3583 MB of trunk a park could add. Letting go to
       // collect that would cost a full re-bind on the next beat,
-      // including the F32 -> bf16 conversion of the generation expert
-      // this checkpoint needs. Not worth it, so it is not done, and the
-      // log says the trunk stayed.
+      // including any F32 -> bf16 conversion the pack needs. Not worth
+      // it, so it is not done, and the log says the trunk stayed.
       //
       // PRELOADED: let go. Nothing was promoted, so the release returned
       // zero and the weight set is the ONLY place bytes can come back

@@ -9,7 +9,7 @@ project(vpipe_sensenova_u1_5 LANGUAGES CXX)
 #
 # A plugin must be rebuilt against the vpipe it deploys with: the ABI
 # handshake is strict equality, so a mismatch is refused at load rather
-# than crashing. This plugin needs ABI 3 -- exactly, not "or newer".
+# than crashing. This plugin needs ABI 4 -- exactly, not "or newer".
 # The number moves whenever the host's plugin surface does, and this
 # plugin tracks it by REBUILDING rather than by source change: it is an
 # image family with its own stage, so the host's video-registry structs

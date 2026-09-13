@@ -363,7 +363,7 @@ U15Weights::load(std::shared_ptr<WeightSet> ws, MetalCompute* mc,
   ok &= need_(s, mc, "language_model.model.norm_mot_gen.weight",
               kTrunkPart, t.norm_gen, &miss, &out->_converted);
   if (opt.with_lm_head) {
-    ok &= need_(s, mc, "language_model.lm_head.weight", kTrunkPart,
+    ok &= need_(s, mc, std::string(kLmHead) + ".weight", kTrunkPart,
                 t.lm_head, &miss, &out->_converted);
   }
 
@@ -621,7 +621,16 @@ U15Weights::resident_bytes() const
   // The promoted layers are the model's own buffers, not cache entries
   // in the weight set, so nothing else counts them. _resid.bytes() is
   // exactly what admission booked.
-  return _bytes + _resid.bytes();
+  //
+  // AND THE READ DESTINATIONS, held for the run as surely as a promoted
+  // layer: the slot pair -- or with slots off, the one per-layer
+  // fallback the last read built -- and the F32 conversion scratch. The
+  // declared floor counts the pair, so a revision that left them out
+  // would read BELOW the floor this model promised, and a peer sizing
+  // after it would be told about room this model is sitting in.
+  std::size_t slots = _slots.last_bytes();
+  if (_slots.on() && _slots.paired()) { slots *= 2; }
+  return _bytes + _resid.bytes() + slots + _f32_scratch.byte_size();
 }
 
 std::size_t
@@ -689,6 +698,38 @@ U15Weights::wire_down()
   const std::size_t n = wire_trunk_(false);
   _wire.note_unwired(n);
   return n;
+}
+
+// GIVE THE POOL BACK BEFORE THE HANDLES GO, on every teardown path.
+// Freeing a wired buffer unwires it in the kernel but tells the pool
+// nothing -- only unwire_from_pool() decrements its counter -- and the
+// stage tears this model down on a model switch, at end of stream and
+// under `destroy`, not only on the park branch that calls wire_down().
+//
+// The trunk matters beyond the counter. Its buffers are the weight SET's
+// cached entries, not this object's, so they outlive it: left wired they
+// stay mlocked, and unparkable, for as long as the manager keeps the
+// checkpoint.
+//
+// In the destructor so that no caller can forget it. Repeating what
+// wire_down() already did is harmless: wire_one() is a no-op for a
+// buffer that is not wired, so nothing is decremented twice.
+U15Weights::~U15Weights()
+{
+  // JOIN FIRST. A prefetch may still be filling a slot through the F32
+  // scratch, and member destruction frees that scratch before the slots'
+  // own destructor would join the read.
+  _slots.join();
+  if (_mc == nullptr || !_wire.on()) { return; }
+  // What the pool granted through the weight set: every cached entry,
+  // which on a preloaded model is every layer as well.
+  wire_trunk_(false);
+  // What it granted through this object's own handles: the promoted
+  // layers. Wired state is tracked PER HANDLE, so the cached aliases a
+  // pinned or preloaded layer holds read as unwired and are skipped.
+  for (MotLayer& L : _layers) {
+    if (!L.und.q.empty()) { _wire.note_unwired(wire_layer_(L, false)); }
+  }
 }
 
 void
@@ -770,12 +811,12 @@ U15Weights::wire_trunk_(bool on)
 //   * the pool can be off entirely (no wired_pool_mb, or
 //     VPIPE_WIRE_RESIDENT=0), and then nothing here is wired;
 //   * `derived()` tensors are outside wire_trunk_'s reach, and on a
-//     bf16 pack that is the ENTIRE generation expert -- half the
-//     checkpoint -- because it ships F32 and is converted at bind.
+//     pack whose generation expert ships F32 that is the ENTIRE expert
+//     -- half the checkpoint -- because it is converted at bind.
 //
-// So on the pack that most needs streaming, roughly half of every
-// pinned layer is unwirable by construction, and this is the only thing
-// that can tell whether the box is actually holding it.
+// So on such a pack, roughly half of every pinned layer is unwirable by
+// construction, and this is the only thing that can tell whether the
+// box is actually holding it.
 void
 U15Weights::resident_pages_(std::size_t* examined, std::size_t* incore,
                             std::size_t* paged_out) const

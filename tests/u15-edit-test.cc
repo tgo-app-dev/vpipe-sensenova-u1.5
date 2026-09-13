@@ -204,7 +204,7 @@ main()
     const auto t0 = std::chrono::steady_clock::now();
     const bool ok = gen->generate(
         "a red fox sitting in snow, photorealistic", no_refs, gp, &base,
-        nullptr, &err);
+        nullptr, {}, &err);
     check(ok, "generated the reference image" +
                   (err.empty() ? "" : " (" + err + ")"));
     if (!ok) { return 1; }
@@ -221,7 +221,7 @@ main()
   std::vector<std::uint8_t> t2i_only;
   {
     const bool ok = gen->generate(edit_prompt, no_refs, gp, &t2i_only,
-                                  nullptr, &err);
+                                  nullptr, {}, &err);
     check(ok, "generated the no-reference control");
     if (!ok) { return 1; }
   }
@@ -231,7 +231,7 @@ main()
   {
     const auto t0 = std::chrono::steady_clock::now();
     const bool ok = gen->generate(edit_prompt, {ref}, gp, &edited, nullptr,
-                                  &err);
+                                  {}, &err);
     check(ok, "edit ran" + (err.empty() ? "" : " (" + err + ")"));
     if (!ok) { return 1; }
     std::printf("       %.1f s (a reference image adds a prefill and "
@@ -258,14 +258,14 @@ main()
   {
     const bool ok = gen->generate(
         "a stone lighthouse on a cliff at sunset, dramatic clouds",
-        no_refs, gp, &other_ref, nullptr, &err);
+        no_refs, gp, &other_ref, nullptr, {}, &err);
     check(ok, "generated a second, unrelated reference");
     if (!ok) { return 1; }
   }
   std::vector<std::uint8_t> edited_other;
   {
     const bool ok = gen->generate(edit_prompt, {to_ref(other_ref, size, size)},
-                                  gp, &edited_other, nullptr, &err);
+                                  gp, &edited_other, nullptr, {}, &err);
     check(ok, "edit ran against the second reference");
     if (!ok) { return 1; }
   }
@@ -291,7 +291,7 @@ main()
   // would also make every comparison above meaningless.
   {
     std::vector<std::uint8_t> again;
-    if (gen->generate(edit_prompt, {ref}, gp, &again, nullptr, &err)) {
+    if (gen->generate(edit_prompt, {ref}, gp, &again, nullptr, {}, &err)) {
       check(again == edited, "the edit is deterministic (same inputs -> "
                              "same bytes)");
     }

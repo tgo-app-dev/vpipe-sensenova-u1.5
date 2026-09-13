@@ -102,11 +102,28 @@ class Generator {
   // `refs` empty => text-to-image. Non-empty => editing, which changes
   // the prefill (reference images enter as UNDERSTANDING tokens under
   // block-causal attention) and may add a third guidance branch.
+  //
+  // `stop` is the COOPERATIVE CANCEL, and it is a separate argument on
+  // purpose: one reports, the other decides, and folding them together
+  // would mean a progress bar that has to be consulted to know whether
+  // to keep going. It is asked before every step AND -- installed on
+  // the backbone -- once per LAYER, because this model streams its 42
+  // layers per pass. One step is a whole read of the checkpoint, so a
+  // check only between steps leaves Stop doing nothing for the length
+  // of one, which at a large geometry is minutes. Null means
+  // uninterruptible.
+  //
+  // A stopped run returns false with `err` set to kStopped, which a
+  // caller tells apart from a failure: nothing went wrong, and nothing
+  // should be warned about.
   bool generate(const std::string& prompt,
                 const std::vector<RefImage>& refs, const GenParams& p,
                 std::vector<std::uint8_t>* out_u8,
                 const std::function<void(int, int)>& progress,
+                const std::function<bool()>& stop,
                 std::string* err);
+
+  static constexpr const char* kStopped = "stopped";
 
   // What a run of this geometry will need, so a stage can declare it
   // before anything loads.

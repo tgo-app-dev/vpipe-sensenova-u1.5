@@ -37,6 +37,7 @@
 #include "apple-silicon/metal-compute/command-stream.h"
 
 #include <memory>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,10 @@ class U15Backbone {
                                              const U15Config& cfg,
                                              U15Weights* w,
                                              std::string* err);
+
+  // Unwires the activation arena through `w`, so the weights must still
+  // be alive -- see the definition.
+  ~U15Backbone();
 
   // Allocate a cache for `capacity` total tokens across all layers.
   KvCache make_cache(int capacity, std::string* err) const;
@@ -118,6 +123,20 @@ class U15Backbone {
     const vpipe::metal_compute::SharedBuffer* t_index = nullptr;
   };
 
+  // A COOPERATIVE STOP, checked once per LAYER.
+  //
+  // Per layer and not per forward, because on a streamed model a single
+  // forward is the whole 42-layer checkpoint read off disk -- minutes at
+  // a large geometry. A stop that is only noticed between forwards is a
+  // Stop button that does nothing for the length of a step, which is
+  // indistinguishable from one that does not work.
+  //
+  // Returning true means ABANDON. Both forwards then return false with
+  // `err` set to kStopped, which the caller tells apart from a real
+  // failure -- a cancelled run is not something to warn about.
+  void set_stop(std::function<bool()> fn) { _stop = std::move(fn); }
+  static constexpr const char* kStopped = "stopped";
+
   // Run `n` tokens of EVERY slot through all layers, layer-outermost.
   // See the note at the top of this file for why the loops are this way
   // round.
@@ -153,6 +172,7 @@ class U15Backbone {
   const U15Config& cfg() const { return _cfg; }
 
  private:
+  std::function<bool()> _stop;
   U15Backbone() = default;
   bool ensure_scratch_(int n, std::string* err);
 

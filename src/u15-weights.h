@@ -3,13 +3,14 @@
 
 // Binding the released checkpoint to GPU buffers.
 //
-// THE DTYPE SPLIT IS THE WHOLE PROBLEM HERE. The base (understanding)
-// expert ships BF16; every `_mot_gen` twin ships F32. That is why 8B
-// parameters per expert is a 50 GB file, and it is not a signal: the
+// THE DTYPE SPLIT, WHEN A PACK HAS ONE. The checkpoint has been published
+// with every `_mot_gen` twin in F32 beside a BF16 base (understanding)
+// expert, and also BF16 throughout. The width is not a signal: the
 // reference declares torch_dtype bfloat16 and casts on load, so bf16 is
-// the intended compute precision for BOTH experts. Converting the F32
-// twins down at bind is faithful, and takes the resident set from ~50 GB
-// to ~35 GB.
+// the intended compute precision for BOTH experts, and converting an F32
+// twin down at bind is faithful. What that saves is a property of the
+// pack -- on one that is already BF16 it saves nothing, and the resident
+// set is the checkpoint's own size.
 //
 // The conversion goes through derived(), which caches only the PRODUCT.
 // The f32 source is read UNCACHED inside the builder and dies when the
@@ -21,9 +22,9 @@
 // they are what a box too small to hold this model gives up: the trunk
 // stays resident and each layer is re-read from the checkpoint as the
 // stack runs. That is the same shape the in-tree DiTs use, with one
-// difference that matters here -- the gen expert ships F32, so a
-// streamed layer cannot use the raw-refill fast path for half its bytes
-// and pays a conversion per pass. See STREAMING COSTS in the .cc.
+// difference that matters on a pack whose gen expert ships F32 -- a
+// streamed layer there cannot use the raw-refill fast path for half its
+// bytes and pays a conversion per pass. See STREAMING COSTS in the .cc.
 //
 // What streams is decided ABOVE this class (the stage asks
 // model_memory::plan_streaming). What grows back is decided BELOW it,
@@ -47,12 +48,13 @@
 // not, which is why there is no residency switch at all below.
 // Mapping is per SHARD, not per tensor -- load_mapped() wraps the whole
 // file -- so it only pays for a loader that converts almost nothing.
-// Half of this checkpoint is F32 that becomes bf16 at bind, and those
-// tensors sit in the same shards as the BF16 ones. Mapping would
-// therefore hold ~46.8 GB of shard beside the ~15.8 GB of converted
-// generation-expert buffers it still had to allocate: ~62.6 GB against
-// 31.6 GB for reading everything Copied. (That is arithmetic over the
-// checkpoint, not a measurement. The measurement vpipe already has is
+// On a pack whose generation expert ships F32, half the checkpoint
+// becomes bf16 at bind, and those tensors sit in the same shards as the
+// BF16 ones. Mapping would therefore hold ~46.8 GB of shard beside the
+// ~15.8 GB of converted generation-expert buffers it still had to
+// allocate: ~62.6 GB against 31.6 GB for reading everything Copied.
+// (That is arithmetic over that revision of the checkpoint, not a
+// measurement. The measurement vpipe already has is
 // the same shape: switching the LM reads to Mapped took peak footprint
 // 3.62 -> 5.00 GB, +38%.)
 //
@@ -141,6 +143,12 @@ struct Trunk {
 
 class U15Weights {
  public:
+  // The lm_head's checkpoint name WITHOUT the `.weight` suffix, since a
+  // quantized pack stores `.scales` and `.biases` beside it. One string
+  // for the loader and the stage's streaming floor, so the floor cannot
+  // subtract a tensor the loader calls something else.
+  static constexpr const char* kLmHead = "language_model.lm_head";
+
   struct Options {
     // The lm_head is only reachable in think-mode, where the model
     // samples text before generating. A pure T2I run never touches it,
@@ -187,6 +195,11 @@ class U15Weights {
       std::shared_ptr<vpipe::genai::WeightSet> ws,
       vpipe::metal_compute::MetalCompute* mc, const U15Config& cfg,
       const Options& opt, std::string* err);
+
+  // Unwires everything this object wired -- the weight set's cached
+  // entries and every promoted layer -- before the handles go, so no
+  // teardown path can leave the pool short. See the definition.
+  ~U15Weights();
 
   const Trunk& trunk() const { return _trunk; }
   const std::vector<MotLayer>& layers() const { return _layers; }
