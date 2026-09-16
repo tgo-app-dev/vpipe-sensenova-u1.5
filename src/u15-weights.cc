@@ -2,7 +2,9 @@
 
 #include "apple-silicon/metal-compute/metal-compute.h"
 #include "generative-models/llama3/metal-llama-weights.h"
+#include "generative-models/shared/accel-settings.h"
 #include "generative-models/shared/streamed-refill.h"
+#include "generative-models/shared/wired-pool.h"
 
 #include "common/vpipe-format.h"
 #include "interfaces/session-context-intf.h"
@@ -911,7 +913,15 @@ U15Weights::set_residency_schedule(int passes)
   // is negotiated with everybody else. MEASURED in the host's own
   // wired-pool.h on a preloaded 35 GB DiT: 1.21x, with compression
   // falling across the run rather than rising.
-  if (_wire_allowed) { _wire.open(_mc); }
+  if (_wire_allowed) {
+    vpipe::FlexData wo = vpipe::FlexData::make_object();
+    vpipe::genai::accel::set_text(&wo, vpipe::genai::wired_pool::kTag,
+                                  "U15Weights");
+    _wire.open(_mc, wo);
+    // A new run: a pool ceiling some earlier model collapsed may be asked
+    // about again. See WiredPool::retry.
+    _wire.new_run();
+  }
   if (!_streaming) { return; }        // the rest is residency policy
   _resid.set_schedule(passes, (int)_layers.size(), layer_bytes(),
                       _wire.on(), _mc->memory_budget());
