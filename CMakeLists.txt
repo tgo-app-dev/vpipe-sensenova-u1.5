@@ -7,13 +7,17 @@ project(vpipe_sensenova_u1_5 LANGUAGES CXX)
 # then load it:
 #   vpipe --plugin build/vpipe-sensenova-u1.5.so ...
 #
-# A plugin must be rebuilt against the vpipe it deploys with: the ABI
-# handshake is strict equality, so a mismatch is refused at load rather
-# than crashing. This plugin needs ABI 4 -- exactly, not "or newer".
-# The number moves whenever the host's plugin surface does, and this
-# plugin tracks it by REBUILDING rather than by source change: it is an
-# image family with its own stage, so the host's video-registry structs
-# never reach it.
+# Built for plugin ABI 8. A host at ABI N loads plugins built for N and
+# N-1, and reads the version from the FILE before loading it, so a
+# plugin outside that window is refused by name rather than crashed.
+# What it needs beyond the integer -- the kernel contract -- is named in
+# src/u15-plugin.cc (kRequires).
+#
+# vpipe's generative-models/shared helpers this model calls (i8_gemm,
+# Sage, the FP8 expansion) are the SDK's TOOLKIT: compiled INTO this
+# binary from vpipe::toolkit, not called in libvpipe, which does not
+# export them. vpipe_add_plugin links it; every test executable that
+# links vpipe links it too.
 find_package(vpipe REQUIRED)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -82,7 +86,7 @@ add_executable(u15-config-test
     src/u15-config.cc)
 target_include_directories(u15-config-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-config-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-config-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-config-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-config-test PRIVATE -Wall -Werror)
@@ -111,7 +115,7 @@ add_executable(u15-weights-test
     src/u15-weights.cc)
 target_include_directories(u15-weights-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-weights-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-weights-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-weights-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-weights-test PRIVATE -Wall -Werror)
@@ -128,7 +132,7 @@ add_executable(u15-m5-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-m5-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-m5-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-m5-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-m5-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-m5-test PRIVATE -Wall -Werror)
@@ -141,7 +145,7 @@ add_executable(u15-kernels-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-kernels-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-kernels-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-kernels-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-kernels-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-kernels-test PRIVATE -Wall -Werror)
@@ -157,7 +161,7 @@ add_executable(u15-sage-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-sage-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-sage-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-sage-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-sage-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-sage-test PRIVATE -Wall -Werror)
@@ -176,7 +180,7 @@ add_executable(u15-layer0-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-layer0-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-layer0-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-layer0-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-layer0-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-layer0-test PRIVATE -Wall -Werror)
@@ -190,7 +194,7 @@ add_executable(u15-prompt-test
     src/u15-prompt.cc)
 target_include_directories(u15-prompt-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-prompt-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-prompt-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-prompt-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-prompt-test PRIVATE -Wall -Werror)
@@ -212,7 +216,7 @@ add_executable(u15-generate-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-generate-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-generate-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-generate-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-generate-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-generate-test PRIVATE -Wall -Werror)
@@ -234,7 +238,7 @@ add_executable(u15-edit-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-edit-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-edit-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-edit-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-edit-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-edit-test PRIVATE -Wall -Werror)
@@ -250,7 +254,7 @@ add_executable(u15-perf-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-perf-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-perf-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-perf-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-perf-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-perf-test PRIVATE -Wall -Werror)
@@ -270,7 +274,7 @@ add_executable(u15-image-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-image-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-image-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-image-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-image-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-image-test PRIVATE -Wall -Werror)
@@ -293,7 +297,7 @@ add_executable(u15-quant-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-quant-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-quant-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-quant-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-quant-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-quant-test PRIVATE -Wall -Werror)
@@ -318,7 +322,7 @@ add_executable(u15-stream-test
     $<TARGET_OBJECTS:u15_kernels_bf16_obj>)
 target_include_directories(u15-stream-test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-stream-test PRIVATE vpipe::vpipe)
+target_link_libraries(u15-stream-test PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-stream-test PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-stream-test PRIVATE -Wall -Werror)
@@ -331,7 +335,7 @@ add_test(NAME u15-stream COMMAND u15-stream-test)
 add_executable(u15-io-bench tests/u15-io-bench.cc)
 target_include_directories(u15-io-bench PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_link_libraries(u15-io-bench PRIVATE vpipe::vpipe)
+target_link_libraries(u15-io-bench PRIVATE vpipe::vpipe vpipe::toolkit)
 target_compile_features(u15-io-bench PRIVATE cxx_std_20)
 if(NOT MSVC)
     target_compile_options(u15-io-bench PRIVATE -Wall -Werror)

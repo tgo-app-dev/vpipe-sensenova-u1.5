@@ -19,8 +19,7 @@
 //
 // Notably NOT used: register_vae_family (there is no VAE) and
 // register_video_family (this is an image model). No host change was
-// needed to ship this plugin -- the plugin surface of ABI 4 is
-// sufficient.
+// needed to ship this plugin.
 //
 // The model weights are Apache-2.0, as is this plugin.
 
@@ -38,6 +37,15 @@ extern "C" const unsigned long u15_kernels_bf16_metallib_len;
 extern "C" const unsigned char u15_kernels_f32_metallib[];
 extern "C" const unsigned long u15_kernels_f32_metallib_len;
 
+// What this plugin cannot run without, beyond the ABI integer: it
+// dispatches host kernels by name -- the steel attention and the dense
+// GEMMs, and through the toolkit the int8 and Sage kernels. A host
+// without the contract refuses the plugin at load, naming it.
+static const char* const kRequires[] = {
+    VPIPE_FEATURE_KERNEL_CONTRACT,
+    nullptr,
+};
+
 static const VpipePluginInfo kInfo = {
     VPIPE_PLUGIN_INFO_SCHEMA,
     "sensenova-u1.5",
@@ -45,6 +53,7 @@ static const VpipePluginInfo kInfo = {
     "T-Go LLC",
     "Apache-2.0 (plugin and weights)",
     "SenseNova-U1.5-8B-MoT: unified MoT image generation and editing",
+    kRequires,
 };
 
 static void

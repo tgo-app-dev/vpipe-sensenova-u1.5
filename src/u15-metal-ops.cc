@@ -1,5 +1,6 @@
 #include "u15-metal-ops.h"
 
+#include "apple-silicon/metal-compute/kernel-contract.h"
 #include "generative-models/shared/i8-gemm.h"
 #include "generative-models/shared/mma-tile.h"
 
@@ -20,17 +21,11 @@ namespace u15 {
 
 namespace {
 
-// C++ mirror of mlx::steel::AttnParams, which lives in the vendored
-// steel headers and is not on the plugin's include path. Field order and
-// types are the contract; nothing here may be reordered.
-struct SteelAttnParams {
-  int B, H, D;
-  int qL, kL;
-  int gqa_factor;
-  float scale;
-  int NQ, NK, NQ_aligned, NK_aligned, qL_rem, kL_rem, qL_off;
-  std::int64_t Q_strides[3], K_strides[3], V_strides[3], O_strides[3];
-};
+// The steel kernels' parameter block, from the host's kernel contract
+// (kernel-contract/1): the host checks it field for field against the
+// kernel's own definition, so a private mirror has nothing to add.
+namespace contract = vpipe::metal_compute::contract;
+using SteelAttnParams = contract::SteelAttnParams;
 
 void
 dispatch_1d_(ComputeEncoder& enc, std::size_t n)
@@ -87,11 +82,14 @@ MetalOps::init(MetalCompute* mc, std::string* err)
     // the strength of this flag before it ever looks a function up --
     // so "the library loaded" is not a strong enough thing to know.
     // The probe constants are the all-aligned case; the specialisation
-    // a real plan asks for differs only in 200/201.
+    // a real plan asks for differs only in the two alignment flags.
     if (_lib_attn_nax.valid()) {
       vpipe::metal_compute::FunctionConstants probe;
-      probe.set_bool(200, true).set_bool(201, true)
-          .set_bool(300, false).set_bool(301, false).set_bool(302, false);
+      probe.set_bool(contract::kAttnAlignQ, true)
+          .set_bool(contract::kAttnAlignK, true)
+          .set_bool(contract::kAttnHasMask, false)
+          .set_bool(contract::kAttnCausal, false)
+          .set_bool(contract::kAttnSinks, false);
       _use_nax = _lib_attn_nax
                      .function("attn_steel_nax_h_bd128_bf16", probe)
                      .valid();
@@ -742,15 +740,15 @@ MetalOps::steel_attn_plan(SteelAttn* p, int heads_q, int heads_kv, int tq,
     s->O_strides[i] = s->Q_strides[i];
   }
 
-  // 200 says the last QUERY tile is full, 201 the last KEY tile -- so
-  // 201 comes from the KEY length. A square-only caller can fill both
-  // from one number and never notice.
+  // AlignQ says the last QUERY tile is full, AlignK the last KEY tile --
+  // so AlignK comes from the KEY length. A square-only caller can fill
+  // both from one number and never notice.
   vpipe::metal_compute::FunctionConstants fc;
-  fc.set_bool(200, (tq % bq) == 0)
-      .set_bool(201, (tkv % bk) == 0)
-      .set_bool(300, false)        // has_mask
-      .set_bool(301, false)        // do_causal
-      .set_bool(302, false);       // has_sinks
+  fc.set_bool(contract::kAttnAlignQ, (tq % bq) == 0)
+      .set_bool(contract::kAttnAlignK, (tkv % bk) == 0)
+      .set_bool(contract::kAttnHasMask, false)
+      .set_bool(contract::kAttnCausal, false)
+      .set_bool(contract::kAttnSinks, false);
   // `nax` is settled at init, so there is no fallback to take here: a
   // NAX library that did not validate never set _use_nax, and the
   // tiling above was chosen from the same flag. Deciding it here

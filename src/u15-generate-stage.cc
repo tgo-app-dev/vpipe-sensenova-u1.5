@@ -1,5 +1,8 @@
 #include "u15-generate-stage.h"
 
+#include "common/beat-keys.h"
+#include "generative-models/accel-keys.h"
+
 #include "apple-silicon/tensor-beat.h"
 #include "common/beat-payload-intf.h"
 #include "common/vpipe-format.h"
@@ -80,7 +83,8 @@ const ConfigKey kAttrs[] = {
           "stage's `init_noise` to compare against the reference",
    .def_int = 42},
 
-  {.key = "i8_gemm", .type = ConfigType::Bool, .required = false,
+  {.key = vpipe::genai::accel::kI8Gemm,
+   .type = ConfigType::Bool, .required = false,
    .doc = "accelerated mode (LOSSY): dynamic-int8 GEMMs for the "
           "backbone's big projections instead of bf16, at int8 quality. "
           "The activation and the weight are quantized on the fly with "
@@ -98,7 +102,8 @@ const ConfigKey kAttrs[] = {
   // generate-video, so no acceleration bag reaches it -- but a user who
   // knows the key on one should not have to learn a second name for the
   // same tier here.
-  {.key = "sage_attn", .type = ConfigType::Bool, .required = false,
+  {.key = vpipe::genai::accel::kSageAttn,
+   .type = ConfigType::Bool, .required = false,
    .doc = "accelerated mode (LOSSY): SageAttention, the flash "
           "attention's QK^T product in int8 with one scale per "
           "attention block and the key side quantized as K - mean(K) "
@@ -115,7 +120,8 @@ const ConfigKey kAttrs[] = {
           "score is computed. Default false; env VPIPE_SAGE_ATTN "
           "overrides",
    .def_bool = false},
-  {.key = "sage_dense_layers", .type = ConfigType::Int, .required = false,
+  {.key = vpipe::genai::accel::kSageDenseLayers,
+   .type = ConfigType::Int, .required = false,
    .doc = "leading backbone layers left in bf16 when sage_attn is on. "
           "Zero by default: Sage computes every key and every query, so "
           "unlike a method that DROPS keys there is no published reason "
@@ -201,7 +207,9 @@ prompt_of_(const FlexData& fd)
 {
   if (fd.is_object()) {
     const auto o = fd.as_object();
-    if (o.contains("text")) { return std::string(o.at("text").as_string("")); }
+    if (o.contains(vpipe::beat::kText)) {
+      return std::string(o.at(vpipe::beat::kText).as_string(""));
+    }
     if (o.contains("prompt")) {
       return std::string(o.at("prompt").as_string(""));
     }
@@ -231,9 +239,10 @@ U15GenerateStage::U15GenerateStage(const SessionContextIntf* s,
   _params.height = (int)this->attr_int("height");
   _params.steps = (int)this->attr_int("steps");
   _params.seed = (std::uint64_t)this->attr_int("seed");
-  _i8_gemm = this->attr_bool("i8_gemm");
-  _sage_attn = this->attr_bool("sage_attn");
-  _sage_dense_layers = (int)this->attr_int("sage_dense_layers");
+  _i8_gemm = this->attr_bool(vpipe::genai::accel::kI8Gemm);
+  _sage_attn = this->attr_bool(vpipe::genai::accel::kSageAttn);
+  _sage_dense_layers =
+      (int)this->attr_int(vpipe::genai::accel::kSageDenseLayers);
   bool bad_policy = false;
   _policy = vpipe::model_memory::parse_unload_policy(
       this->attr_str("unload_when_idle"), &bad_policy);

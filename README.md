@@ -51,11 +51,17 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/vpipe-install
 cmake --build build -j
 ```
 
-A plugin must be built against the vpipe it deploys with — the ABI handshake is
-strict equality, so the requirement is **exactly the ABI of that vpipe**, never
-a minimum. That is **4** today. The number moves whenever the host's plugin
-surface does, and a plugin built against an older one is refused at load rather
-than crashed.
+Needs an installed vpipe with **plugin ABI 8**. A host at ABI N loads plugins
+built for N and N−1, and reads the version from the file before loading it, so
+a binary outside that window is refused with a message naming both versions
+rather than crashed. Beyond the integer the plugin requires one host feature,
+`kernel-contract/1` — it dispatches the host's steel attention and dense GEMMs
+by name — and a host without it refuses the plugin by name.
+
+vpipe's `generative-models/shared` helpers the model calls — `i8_gemm`,
+SageAttention, the FP8 expansion — are the SDK's **toolkit**: compiled into this
+binary from `vpipe::toolkit`, not called in libvpipe. `vpipe_add_plugin` links
+it; so does every test target here.
 
 ## Run
 
